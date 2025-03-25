@@ -1,0 +1,40 @@
+{
+  "project_info": {
+    "project_number": "257905915742",
+    "firebase_url": "https://esp-first-base-default-rtdb.firebaseio.com",
+    "project_id": "esp-first-base",
+    "storage_bucket": "esp-first-base.appspot.com"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:257905915742:android:dbdeb9c90aa9af0454c1cf",
+        "android_client_info": {
+          "package_name": "com.example.smartsecurity"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "257905915742-b4buev529g8tsii1cdviuf864fich6st.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBnXLeB4TL1STbF2bST-Sey_xfSCTKP7EM"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "257905915742-b4buev529g8tsii1cdviuf864fich6st.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
