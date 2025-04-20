@@ -63,7 +63,7 @@ class _MyAppState extends State<MyApp> {
       builder: (context, state) {
         return ToastificationWrapper(
           child: MaterialApp(
-            title: 'Security ID',
+            title: 'GuardTag',
             debugShowCheckedModeBanner: false,
             theme: ThemeService.buildTheme(state),
             home: const SplashScreen(),

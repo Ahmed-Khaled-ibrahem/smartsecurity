@@ -28,7 +28,7 @@ class _HomeState extends State<Home> {
     return Scaffold(
       appBar: AppBar(
         title: const Text(
-          "Security ID",
+          "GuardTag",
           style: TextStyle(fontWeight: FontWeight.bold),
         ),
         actions: [
