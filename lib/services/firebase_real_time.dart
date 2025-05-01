@@ -8,6 +8,8 @@ import 'firebase_auth.dart';
 
 class FirebaseRealTimeDB {
   final _database = FirebaseDatabase.instance.ref();
+  String currentMail = '';
+  Map zonedMessages = {};
 
   Future<List<Device>> getData() async {
     final snapshot = await _database.child('rfid').once();
@@ -31,14 +33,24 @@ class FirebaseRealTimeDB {
     });
     _database.child('users').onValue.listen((event) async {
       getIt<AppCubit>().refresh();
-      // getIt<AppCubit>().checkPermissions();
+      String uid = getIt<FirebaseAuthRepo>().currentUser?.uid ?? '';
+      currentMail =  event.snapshot.child(uid).child('email').value.toString();
     });
-    _database.child('users').child(getIt<FirebaseAuthRepo>().currentUser!.uid).child('notifications').onValue.listen((event) async {
+    _database
+        .child('users')
+        .child(getIt<FirebaseAuthRepo>().currentUser!.uid)
+        .child('notifications')
+        .onValue
+        .listen((event) async {
       getIt<AppCubit>().refresh();
       Map notifications = event.snapshot.value as Map? ?? {};
       if (notifications.isNotEmpty) {
         showToast('Message From Admin', notifications.values.last);
       }
+    });
+    _database.child('zone_messaging').onValue.listen((event) async {
+      zonedMessages = await getIt<FirebaseRealTimeDB>().getMessages();
+      await getIt<AppCubit>().refresh();
     });
   }
 
@@ -59,14 +71,16 @@ class FirebaseRealTimeDB {
       'email': email,
       'zone': zone,
       'pass': pass,
+      'available': false
     });
   }
 
-  isAdmin() async {
-    String uid = getIt<FirebaseAuthRepo>().currentUser?.uid ?? '';
-    final mail = await _database.child('users').child(uid).child('email').get();
-    String mailValue = mail.value.toString();
-    String adminEmail = "ahmedkhaledibrahemm@gmail.com";
+  isAdmin()  {
+    // String uid = getIt<FirebaseAuthRepo>().currentUser?.uid ?? '';
+    // final mail = await _database.child('users').child(uid).child('email').get();
+    // String mailValue = mail.value.toString();
+    String mailValue = currentMail;
+    String adminEmail = "test@gmail.com";
     return adminEmail == mailValue;
   }
 
@@ -76,8 +90,18 @@ class FirebaseRealTimeDB {
     return usersMap ?? {};
   }
 
+  Future<Map> getMessages() async {
+    final snapshot = await _database.child('zone_messaging').once();
+    final usersMap = snapshot.snapshot.value as Map?;
+    return usersMap ?? {};
+  }
+
   updateZone(String id, String zone) async {
     await _database.child('users').child(id).update({'zone': zone});
+  }
+
+  updateAvailable(String id, bool val) async {
+    await _database.child('users').child(id).update({'available': val});
   }
 
   addNotification(String id, String message) async {
@@ -88,8 +112,22 @@ class FirebaseRealTimeDB {
       formattedDate: message,
     });
   }
+
+  addMessage(String message, String zone) async {
+    DateTime now = DateTime.now();
+    String formattedDate = DateFormat('yyyy-MM-dd HH:mm:ss').format(now);
+
+    await _database.child('zone_messaging').child(zone.trim()).child(formattedDate).update({
+      'content': message,
+      'time': formattedDate,
+      'sender_id': getIt<FirebaseAuthRepo>().currentUser?.uid,
+      'sender_name': getIt<FirebaseAuthRepo>().currentUser?.displayName
+    });
+  }
+
   deleteAllNotifications() async {
     String id = getIt<FirebaseAuthRepo>().currentUser?.uid ?? '';
-    await _database.child('users').child(id).child("notifications").remove();
+    await _database.child('zone_messaging').remove();
   }
+
 }

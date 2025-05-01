@@ -20,155 +20,165 @@ class MyDrawer extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Drawer(
-      child: SafeArea(
-        child: BlocBuilder<ThemeBloc, ThemeState>(
-          builder: (context, state) {
-            return Column(children: <Widget>[
-              const SizedBox(
-                height: 30,
-              ),
-              ListTile(
-                leading: const CircleAvatar(
-                  backgroundImage: NetworkImage(
-                      'https://cdn-icons-png.flaticon.com/512/219/219988.png'),
-                ),
-                title: Text(
-                  getIt<FirebaseAuthRepo>().currentUser?.displayName ?? '',
-                  style: const TextStyle(fontWeight: FontWeight.bold),
-                ),
-                subtitle: Text(
-                  getIt<FirebaseAuthRepo>().currentUser?.email ?? '',
-                  style: const TextStyle(
-                      fontWeight: FontWeight.w400, fontSize: 10),
-                ),
-              ),
-              const Divider(
-                indent: 10,
-                endIndent: 10,
-                color: Colors.orange,
-              ),
-              const SizedBox(
-                height: 30,
-              ),
-              const Row(
-                children: [
-                  SizedBox(
-                    width: 20,
+      child: BlocBuilder<AppCubit, AppState>(
+        builder: (context, state) {
+          return SafeArea(
+            child: BlocBuilder<ThemeBloc, ThemeState>(
+              builder: (context, state) {
+                return Column(children: <Widget>[
+                  const SizedBox(
+                    height: 30,
                   ),
-                  Text(
-                    "Theme",
-                    style: TextStyle(fontSize: 20),
+                  ListTile(
+                    leading: const CircleAvatar(
+                      backgroundImage: NetworkImage(
+                          'https://cdn-icons-png.flaticon.com/512/219/219988.png'),
+                    ),
+                    title: Text(
+                      getIt<FirebaseAuthRepo>().currentUser?.displayName ?? '',
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    subtitle: Text(
+                      getIt<FirebaseAuthRepo>().currentUser?.email ?? '',
+                      style: const TextStyle(
+                          fontWeight: FontWeight.w400, fontSize: 10),
+                    ),
                   ),
-                ],
-              ),
-              ListTile(
-                leading: const Icon(Icons.light_mode),
-                title: const Text('Light'),
-                tileColor: state.isDark ? null : ThemeService.lightSelections,
-                onTap: () => lightTheme(context),
-              ),
-              ListTile(
-                leading: const Icon(Icons.dark_mode),
-                title: const Text('Dark'),
-                onTap: () => darkTheme(context),
-                tileColor: state.isDark ? ThemeService.darkSelections : null,
-              ),
-              // ListTile(
-              //   leading: const Icon(Icons.phone_android),
-              //   title: const Text('Device Theme'),
-              //   onTap: () => deviceTheme(context),
-              // ),
-              const SizedBox(
-                height: 30,
-              ),
-
-              Builder(builder: (context) {
-                if (getIt<AppCubit>().isAdmin) {
-                  return Column(
+                  const Divider(
+                    indent: 10,
+                    endIndent: 10,
+                    color: Colors.orange,
+                  ),
+                  const SizedBox(
+                    height: 30,
+                  ),
+                  const Row(
                     children: [
-                      const Divider(
-                        indent: 10,
-                        endIndent: 10,
-                        color: Colors.orange,
+                      SizedBox(
+                        width: 20,
                       ),
-                      ListTile(
-                        leading: const Icon(Icons.roundabout_left_outlined),
-                        title: const Text('Permissions'),
-                        onTap: () {
-                          Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                  builder: (context) => const PernitionsScreen()));
-                        },
-                      ),
-                      ListTile(
-                        leading: const Icon(Icons.message),
-                        title: const Text('Messaging'),
-                        onTap: () {
-                          Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                  builder: (context) => const SendNotification()));
-                        },
-                      ),
-                      ListTile(
-                        leading: const Icon(Icons.supervised_user_circle_rounded),
-                        title: const Text('Staff'),
-                        onTap: () {
-                          Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                  builder: (context) => const UsersScreen()));
-                        },
+                      Text(
+                        "Theme",
+                        style: TextStyle(fontSize: 20),
                       ),
                     ],
-                  );
-                }
-                return Container();
-              }),
-              const Divider(
-                indent: 10,
-                endIndent: 10,
-                color: Colors.orange,
-              ),
-              ListTile(
-                onTap: () async {
-                  bool result = await showConfirmationDialog(context,
-                      title: 'Logout',
-                      content: 'Are you sure you want to logout?');
-                  if (result) {
-                    getIt<FirebaseAuthRepo>().signOut();
-                  }
-                },
-                leading: const Icon(Icons.door_back_door_outlined),
-                title: const Text('Logout'),
-              ),
-              const Spacer(),
-              Builder(builder: (context) {
-                if (getIt<AppCubit>().isAdmin) {
-                  return const Padding(
-                    padding: EdgeInsets.all(8.0),
-                    child: Column(
-                      children: [
-                        Icon(
-                          Icons.verified,
-                          size: 40,
-                          color: Colors.green,
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.light_mode),
+                    title: const Text('Light'),
+                    tileColor:
+                        state.isDark ? null : ThemeService.lightSelections,
+                    onTap: () => lightTheme(context),
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.dark_mode),
+                    title: const Text('Dark'),
+                    onTap: () => darkTheme(context),
+                    tileColor:
+                        state.isDark ? ThemeService.darkSelections : null,
+                  ),
+                  // ListTile(
+                  //   leading: const Icon(Icons.phone_android),
+                  //   title: const Text('Device Theme'),
+                  //   onTap: () => deviceTheme(context),
+                  // ),
+                  const SizedBox(
+                    height: 30,
+                  ),
+
+                  Builder(builder: (context) {
+                    if (getIt<AppCubit>().isAdmin) {
+                      return Column(
+                        children: [
+                          const Divider(
+                            indent: 10,
+                            endIndent: 10,
+                            color: Colors.orange,
+                          ),
+                          ListTile(
+                            leading: const Icon(Icons.roundabout_left_outlined),
+                            title: const Text('Permissions'),
+                            onTap: () {
+                              Navigator.push(
+                                  context,
+                                  MaterialPageRoute(
+                                      builder: (context) =>
+                                          const PernitionsScreen()));
+                            },
+                          ),
+                          ListTile(
+                            leading: const Icon(Icons.message),
+                            title: const Text('Messaging'),
+                            onTap: () {
+                              Navigator.push(
+                                  context,
+                                  MaterialPageRoute(
+                                      builder: (context) =>
+                                          const SendNotification()));
+                            },
+                          ),
+                          ListTile(
+                            leading: const Icon(
+                                Icons.supervised_user_circle_rounded),
+                            title: const Text('Staff'),
+                            onTap: () {
+                              Navigator.push(
+                                  context,
+                                  MaterialPageRoute(
+                                      builder: (context) =>
+                                          const UsersScreen()));
+                            },
+                          ),
+                        ],
+                      );
+                    }
+                    return Container();
+                  }),
+                  const Divider(
+                    indent: 10,
+                    endIndent: 10,
+                    color: Colors.orange,
+                  ),
+                  ListTile(
+                    onTap: () async {
+                      bool result = await showConfirmationDialog(context,
+                          title: 'Logout',
+                          content: 'Are you sure you want to logout?');
+                      if (result) {
+                        getIt<FirebaseAuthRepo>().signOut();
+                      }
+                    },
+                    leading: const Icon(Icons.door_back_door_outlined),
+                    title: const Text('Logout'),
+                  ),
+                  const Spacer(),
+                  Builder(builder: (context) {
+                    if (getIt<AppCubit>().isAdmin) {
+                      return const Padding(
+                        padding: EdgeInsets.all(8.0),
+                        child: Column(
+                          children: [
+                            Icon(
+                              Icons.verified,
+                              size: 40,
+                              color: Colors.green,
+                            ),
+                            Text(
+                              'admin account',
+                              style: TextStyle(
+                                  fontSize: 16, fontWeight: FontWeight.bold),
+                            ),
+                          ],
                         ),
-                        Text(
-                          'admin account',
-                          style: TextStyle(
-                              fontSize: 16, fontWeight: FontWeight.bold),
-                        ),
-                      ],
-                    ),
-                  );
-                }
-                return Container();
-              })
-            ]);
-          },
-        ),
+                      );
+                    }
+                    return Container();
+                  })
+                ]);
+              },
+            ),
+          );
+        },
       ),
     );
   }

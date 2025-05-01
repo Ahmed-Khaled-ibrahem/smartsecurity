@@ -74,13 +74,13 @@ class _RegisterScreenState extends State<RegisterScreen> {
                             return null;
                           },
                         ),
-                        TextFormField(
-                          controller: _zoneNameController,
-                          decoration:
-                          const InputDecoration(labelText: 'Zone Name'),
-                          validator: (value) =>
-                          value!.isEmpty ? 'Enter Zone name' : null,
-                        ),
+                        // TextFormField(
+                        //   controller: _zoneNameController,
+                        //   decoration:
+                        //   const InputDecoration(labelText: 'Zone Name'),
+                        //   validator: (value) =>
+                        //   value!.isEmpty ? 'Enter Zone name' : null,
+                        // ),
                         const SizedBox(height: 20),
                         SizedBox(
                           width: double.infinity,

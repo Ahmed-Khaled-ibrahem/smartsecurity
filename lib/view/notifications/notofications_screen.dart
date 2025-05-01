@@ -6,6 +6,7 @@ import 'package:smartsecurity/controller/appCubit/app_cubit.dart';
 import 'package:smartsecurity/services/firebase_auth.dart';
 import 'package:smartsecurity/services/firebase_real_time.dart';
 import '../../services/get_it.dart';
+import '../messaging/send_notification.dart';
 
 class NotoficationsScreen extends StatefulWidget {
   const NotoficationsScreen({super.key});
@@ -15,72 +16,187 @@ class NotoficationsScreen extends StatefulWidget {
 }
 
 class _NotoficationsScreenState extends State<NotoficationsScreen> {
+  String selectedTab = 'Inbox'; // Default tab
+  Map zonedMessages = {};
+  Map inboxMessages = {};
+  Map outboxMessages = {};
+
+  @override
+  void initState() {
+    super.initState();
+    zonedMessages = getIt<FirebaseRealTimeDB>().zonedMessages;
+  }
+
+  filterMessages() {
+    String myID = getIt<FirebaseAuthRepo>().currentUser!.uid.toString();
+    bool isAdmin = getIt<FirebaseRealTimeDB>().isAdmin();
+    String myZone = getIt<AppCubit>().allStaff[myID]['zone'] ?? '';
+
+    zonedMessages.forEach((zoneName, messages) {
+      messages.forEach((messageID, messageMap) {
+        if (isOutbox(messageMap)) {
+          messageMap['zone'] = zoneName;
+          outboxMessages[messageID] = messageMap;
+        } else {
+          if (isAdmin) {
+            messageMap['zone'] = zoneName;
+            inboxMessages[messageID] = messageMap;
+          } else {
+            if (myZone.trim() == zoneName.trim()) {
+              messageMap['zone'] = zoneName;
+              inboxMessages[messageID] = messageMap;
+            }
+          }
+        }
+      });
+    });
+  }
+
+  bool isOutbox(Map messageMap) {
+    return messageMap['sender_id'] ==
+        getIt<FirebaseAuthRepo>().currentUser!.uid.toString();
+  }
+
   @override
   Widget build(BuildContext context) {
+
     return Scaffold(
+      bottomNavigationBar: GestureDetector(
+        onTap: () {
+          Navigator.push(
+              context,
+              MaterialPageRoute(
+                  builder: (context) => const SendNotification()));
+        },
+        child: const Card(
+            child: Padding(
+                padding: EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [Text('Send New Message'), Icon(Icons.send)],
+                ))),
+      ),
       appBar: AppBar(
-        title: const Text('Notifications'),
+        title: const Text('Messaging'),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.delete),
-            onPressed: () async {
-              bool? result = await showConfirmationDialog(context, title: 'Delete', content: 'Are you sure you want to delete all notifications?');
-              if (result == true) {
-                getIt<FirebaseRealTimeDB>().deleteAllNotifications();
-                Navigator.pop(context);
-              }
-            },
-          )
+          Builder(builder: (context) {
+            if (!getIt<FirebaseRealTimeDB>().isAdmin()) {
+              return Container();
+            }
+            return IconButton(
+              icon: const Icon(Icons.delete),
+              onPressed: () async {
+                bool? result = await showConfirmationDialog(context,
+                    title: 'Delete',
+                    content: 'Are you sure you want to delete all notifications?');
+                if (result == true) {
+                  getIt<FirebaseRealTimeDB>().deleteAllNotifications();
+                  Navigator.pop(context);
+                }
+              },
+            );
+          }),
         ],
       ),
       body: BlocBuilder<AppCubit, AppState>(
         builder: (context, state) {
-          var appCubit = getIt<AppCubit>();
-          Map staff = appCubit.allStaff;
-          Map? myData = staff[getIt<FirebaseAuthRepo>().currentUser!.uid.toString()];
+          zonedMessages = getIt<FirebaseRealTimeDB>().zonedMessages;
+          filterMessages();
+          return Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.all(15),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Expanded(
+                      flex: selectedTab == 'Inbox' ? 2 : 1,
+                      child: TextButton(
+                        style: TextButton.styleFrom(
+                          backgroundColor: selectedTab != 'Outbox'
+                              ? Colors.lightBlueAccent
+                              : Colors.grey.withOpacity(0),
+                        ),
+                        onPressed: () {
+                          setState(() {
+                            selectedTab = 'Inbox';
+                          });
+                        },
+                        child: Text(
+                          'Inbox',
+                          style: TextStyle(
+                            color: selectedTab == 'Inbox'
+                                ? Theme.of(context).primaryColor
+                                : Colors.grey,
+                          ),
+                        ),
+                      ),
+                    ),
+                    Expanded(
+                      flex: selectedTab == 'Inbox' ? 1 : 2,
+                      child: TextButton(
+                        style: TextButton.styleFrom(
+                          backgroundColor: selectedTab == 'Outbox'
+                              ? Colors.lightBlueAccent
+                              : Colors.grey.withOpacity(0),
+                        ),
+                        onPressed: () {
+                          setState(() {
+                            selectedTab = 'Outbox';
+                          });
+                        },
+                        child: Text(
+                          'Outbox',
+                          style: TextStyle(
+                            color: selectedTab == 'Outbox'
+                                ? Theme.of(context).primaryColor
+                                : Colors.grey,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Builder(builder: (context) {
+                if (selectedTab == 'Inbox') {
+                  return listMessages(inboxMessages);
+                }
+                return listMessages(outboxMessages);
+              })
+            ],
+          );
+        },
+      ),
+    );
+  }
 
-          if (myData == null) {
-            return  const Center(
+  Widget listMessages(Map messages) {
+    return Expanded(
+      child: ListView.builder(
+        itemCount: messages.length,
+        itemBuilder: (context, index) {
+          var message = messages.values.toList()[index];
+          return Card(
+            margin: const EdgeInsets.all(10),
+            child: Padding(
+              padding: const EdgeInsets.all(10),
               child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                crossAxisAlignment: CrossAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Icon(
-                    Icons.notifications_none_outlined,
-                    size: 64,
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 15),
+                    child: Text(message['zone'] ?? ''),
                   ),
-                  Text('error')
+                  const Divider(),
+                  ListTile(
+                    title: Text(message['content']),
+                    subtitle: Text('By : '+message['sender_name']),
+                    trailing: Text(message['time'].split(' ')[0] +'\n'+ message['time'].split(' ')[1]),
+                  ),
                 ],
               ),
-            );
-          }
-          Map notifications = myData['notifications'] ?? {};
-
-          if (notifications.isEmpty) {
-            return  const Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                  Icon(
-                    Icons.notifications_none_outlined,
-                    size: 64,
-                  ),
-                  Text('No Notifications')
-                ],
-              ),
-            );
-          }
-
-          return  ListView(
-            children:
-              notifications.entries.map((entry) {
-                return ListTile(
-                  title: Text(entry.value),
-                  subtitle: Text(entry.key),
-                );
-              }).toList()
-            ,
+            ),
           );
         },
       ),
