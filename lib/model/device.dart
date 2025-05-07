@@ -25,7 +25,6 @@ class Device {
     );
   }
 
-
   get cardCount => cards?.length ?? 0;
 
   get inside {

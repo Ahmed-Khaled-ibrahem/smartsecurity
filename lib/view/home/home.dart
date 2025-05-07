@@ -371,7 +371,7 @@ class _HomeState extends State<Home> {
       margin: const EdgeInsets.all(0),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.end,
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        mainAxisAlignment: MainAxisAlignment.spaceAround,
         children: [
           Card(
             margin: const EdgeInsets.all(1),
@@ -510,18 +510,66 @@ class _HomeState extends State<Home> {
            Padding(
             padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 5),
             child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Icon(Icons.people, color: Colors.amberAccent,),
-                const SizedBox(width: 5),
-                const Text('Staff : ',
-                    style: TextStyle(fontWeight: FontWeight.w900, color: Colors.amberAccent)),
-                Text(staffCount.toString(), style: TextStyle(fontWeight: FontWeight.w900, color: Colors.amberAccent)),
-                const Spacer(),
-                const Icon(Icons.people, color: Color(0xFF00FF00),),
-                const SizedBox(width: 5),
-                const Text('Available : ',
-                    style: TextStyle(fontWeight: FontWeight.w900, color: Color(0xFF00FF00))),
-                Text(staffAvailableCount.toString(), style: TextStyle(fontWeight: FontWeight.w900, color: Color(0xFF00FF00))),
+                // Row(
+                //   children: [
+                //     const Icon(Icons.people, color: Colors.amberAccent,size: 15,),
+                //     const SizedBox(width: 5),
+                //     const Text('Staff : ',
+                //         style: TextStyle(fontSize: 10,fontWeight: FontWeight.w900, color: Colors.amberAccent)),
+                //     Text(staffCount.toString(), style: const TextStyle(fontSize: 10,fontWeight: FontWeight.w900, color: Colors.amberAccent)),
+                //   ],
+                // ),
+                // Row(
+                //   children: [
+                //     const Icon(Icons.people, color: Colors.tealAccent,size: 15,),
+                //     const SizedBox(width: 5),
+                //     const Text('Unauthorized : ',
+                //         style: TextStyle(fontSize: 10,fontWeight: FontWeight.w900, color: Colors.tealAccent)),
+                //     Text(staffCount.toString(), style: const TextStyle(fontSize: 10,fontWeight: FontWeight.w900, color: Colors.tealAccent)),
+                //   ],
+                // ),
+                // Row(
+                //   children: [
+                //     const Icon(Icons.people, color: Color(0xFF00FF00),size: 15,),
+                //     const SizedBox(width: 5),
+                //     const Text('Available : ',
+                //         style: TextStyle(fontSize: 10,fontWeight: FontWeight.w900, color: Color(0xFF00FF00))),
+                //     Text(staffAvailableCount.toString(), style: const TextStyle(fontSize: 10,fontWeight: FontWeight.w900, color: Color(0xFF00FF00))),
+                //   ],
+                // ),
+                Row(
+                  children: [
+                    const Icon(Icons.people, color: Colors.amberAccent,size: 25,),
+                    const SizedBox(width: 5),
+                    Text(staffCount.toString(), style: const TextStyle(fontSize: 14,fontWeight: FontWeight.w900, color: Colors.amberAccent)),
+                  ],
+                ),
+                Row(
+                  children: [
+                    const Icon(Icons.block, color: Colors.tealAccent,size: 25,),
+                    const SizedBox(width: 5),
+                    Builder(
+                      builder: (context) {
+                        int counter = 0;
+                        devices[index].cards?.forEach((cardi) {
+                          if(getIt<AppCubit>().unAuthorizedDevicesCounter[cardi.id] != null) {
+                            counter+=getIt<AppCubit>().unAuthorizedDevicesCounter[cardi.id]!;
+                          }
+                        });
+                        return Text(counter.toString(), style: const TextStyle(fontSize: 14,fontWeight: FontWeight.w900, color: Colors.tealAccent));
+                      }
+                    ),
+                  ],
+                ),
+                Row(
+                  children: [
+                    const Icon(Icons.online_prediction, color: Color(0xFF00FF00),size: 25,),
+                    const SizedBox(width: 5),
+                    Text(staffAvailableCount.toString(), style: const TextStyle(fontSize: 14,fontWeight: FontWeight.w900, color: Color(0xFF00FF00))),
+                  ],
+                ),
               ],
             ),
           ),

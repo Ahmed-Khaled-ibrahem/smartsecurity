@@ -16,6 +16,7 @@ class AppCubit extends Cubit<AppState> {
   List<String> lastNotifiedCardsIDs = [];
   bool isAdmin = false;
   Map allStaff = {};
+  Map<String, int> unAuthorizedDevicesCounter = {};
 
   void init() async {
     debugPrint("init");
@@ -62,7 +63,11 @@ class AppCubit extends Cubit<AppState> {
                   if (!permissionDevice.isAllowed) {
                     showToast('Alert',
                         '${cardPermission.cardName} is not allowed in ${esp.name}');
+                    unAuthorizedDevicesCounter[cardPermission.cardId] = unAuthorizedDevicesCounter[cardPermission.cardId] ?? 0 + 1;
+                    print('----------------');
+                    print(unAuthorizedDevicesCounter);
                     lastNotifiedCardsIDs.add(card.id);
+                    refresh();
                   }
                 }
               });
