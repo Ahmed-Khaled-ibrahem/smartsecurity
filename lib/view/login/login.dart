@@ -1,5 +1,4 @@
 import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:smartsecurity/services/get_it.dart';
 import 'package:smartsecurity/view/login/register_screen.dart';
@@ -35,9 +34,12 @@ class _LoginScreenState extends State<LoginScreen> {
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    const Icon(
-                      Icons.logo_dev_rounded,
-                      size: 80,
+                    const SizedBox(height: 30),
+                    const CircleAvatar(
+                      backgroundImage:AssetImage('assets/loggo.jpeg'),
+                        backgroundColor: Colors.white,
+                        radius: 100,
+                        // child: Image.asset('assets/loggo.jpeg')
                     ),
                     TextFormField(
                       controller: emailController,
