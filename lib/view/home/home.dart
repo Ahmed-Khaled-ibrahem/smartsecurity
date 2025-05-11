@@ -8,6 +8,7 @@ import 'package:smartsecurity/services/get_it.dart';
 import 'package:smartsecurity/view/home/drawer.dart';
 import 'package:syncfusion_flutter_charts/charts.dart';
 import '../../controller/appCubit/app_cubit.dart';
+import '../../model/unauthorized_model.dart';
 import '../../services/firebase_auth.dart';
 import '../notifications/notofications_screen.dart';
 import 'add_device.dart';
@@ -530,11 +531,16 @@ class _HomeState extends State<Home> {
                     Builder(
                         builder: (context) {
                           int counter = 0;
+                          List<UnAuthorizedModel> unAuthorizedDevices = getIt<AppCubit>().unAuthorizedDevices;
+
                           devices[index].cards?.forEach((cardi) {
-                            if(getIt<AppCubit>().unAuthorizedDevicesCounter[cardi.id] != null) {
-                              counter+=getIt<AppCubit>().unAuthorizedDevicesCounter[cardi.id]!;
-                            }
+                            unAuthorizedDevices.where((e) => e.cardId == cardi.id).forEach((element) {
+                              if(element.zoneId == devices[index].id){
+                                counter+= 1;
+                              }
+                            });
                           });
+
                           return Text(counter.toString(), style: const TextStyle(fontSize: 10,fontWeight: FontWeight.w900, color: Colors.tealAccent));
                         }
                     ),],
