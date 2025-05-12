@@ -84,6 +84,12 @@ class FirebaseRealTimeDB {
     return adminEmail == mailValue;
   }
 
+  getAdminEmail() async {
+    final snapshot = await _database.child('users').once();
+    String uid = getIt<FirebaseAuthRepo>().currentUser?.uid ?? '';
+    currentMail =  snapshot.snapshot.child(uid).child('email').value.toString();
+  }
+
   getAllUsers() async {
     final snapshot = await _database.child('users').once();
     final usersMap = snapshot.snapshot.value as Map?;

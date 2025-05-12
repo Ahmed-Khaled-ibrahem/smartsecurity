@@ -9,14 +9,20 @@ import '../../common/confirmation_dialog.dart';
 import '../../controller/theme_bloc/theme_bloc.dart';
 import '../../controller/theme_bloc/theme_event.dart';
 import '../../services/firebase_auth.dart';
+import '../../services/firebase_real_time.dart';
 import '../../services/get_it.dart';
 import '../messaging/send_notification.dart';
 import '../permetions/pernitions_screen.dart';
 import '../users/users_screen.dart';
 
-class MyDrawer extends StatelessWidget {
+class MyDrawer extends StatefulWidget {
   const MyDrawer({super.key});
 
+  @override
+  State<MyDrawer> createState() => _MyDrawerState();
+}
+
+class _MyDrawerState extends State<MyDrawer> {
   @override
   Widget build(BuildContext context) {
     return Drawer(
@@ -87,7 +93,7 @@ class MyDrawer extends StatelessWidget {
                   ),
 
                   Builder(builder: (context) {
-                    if (getIt<AppCubit>().isAdmin) {
+                    if (getIt<FirebaseRealTimeDB>().isAdmin()) {
                       return Column(
                         children: [
                           const Divider(

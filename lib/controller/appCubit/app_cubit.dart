@@ -59,8 +59,11 @@ class AppCubit extends Cubit<AppState> {
               for (var permissionDevice in cardPermission.permissions.permissions) {
                 if (permissionDevice.espId == esp.id) {
                   if (!permissionDevice.isAllowed) {
-                    showToast('Alert',
-                        '${cardPermission.cardName} is not allowed in ${esp.name}');
+
+                    if(isAdmin){
+                      showToast('Alert',
+                          '${cardPermission.cardName} is not allowed in ${esp.name}');
+                    }
 
                     UnAuthorizedModel m = UnAuthorizedModel(
                       zoneId: esp.id,

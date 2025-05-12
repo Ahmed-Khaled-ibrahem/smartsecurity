@@ -36,7 +36,7 @@ class _LoginScreenState extends State<LoginScreen> {
                   children: [
                     const SizedBox(height: 30),
                     const CircleAvatar(
-                      backgroundImage:AssetImage('assets/loggo.jpeg'),
+                      backgroundImage: AssetImage('assets/loggo.jpeg'),
                         backgroundColor: Colors.white,
                         radius: 100,
                         // child: Image.asset('assets/loggo.jpeg')

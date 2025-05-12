@@ -26,6 +26,12 @@ class _HomeState extends State<Home> {
   bool isAvailable = false;
 
   @override
+  void initState() {
+    super.initState();
+    getIt<FirebaseRealTimeDB>().getAdminEmail();
+  }
+
+  @override
   Widget build(BuildContext context) {
     isPortrait = (MediaQuery.of(context).orientation == Orientation.portrait);
 
