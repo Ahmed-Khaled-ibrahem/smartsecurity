@@ -3,13 +3,13 @@ import board
 import busio
 from adafruit_pn532.i2c import PN532_I2C
 import requests
-from gpiozero import LED, InputDevice
+from gpiozero import LED, InputDevice, Buzzer
 from signal import pause
 from threading import Event, Thread
 
 # Firebase database URL
-database_url = "https://smart-attendence-system-c957c-default-rtdb.asia-southeast1.firebasedatabase.app/students.json"
-api_key = "AIzaSyB1B7WepWmskcxOXcEJDfqJMcaMs4aXQcI"
+database_url = "https://smart-attendance-system-94fec-default-rtdb.asia-southeast1.firebasedatabase.app/students.json"
+api_key = "AIzaSyCf8C3-ORNNA-2XfM4Jhl70NO9zqkSaOc4"
 
 # Dictionary to store the last scanned time for each UID
 last_scanned = {}
@@ -40,8 +40,13 @@ key_map = {
 }
 
 # Initialize rows as InputDevice (input with pull-down) and columns as LEDs (outputs)
-rows = [InputDevice(pin, pull_up=False) for pin in row_pins]  # pull_up=False for internal pull-down
-cols = [LED(pin) for pin in col_pins]  # Columns are outputs
+rows = [InputDevice(pin, pull_up=False) for pin in row_pins]
+cols = [LED(pin) for pin in col_pins]
+
+# LEDs and buzzer
+red_led = LED(19)    # Pin for red LED
+green_led = LED(13)  # Pin for green LED
+buzzer = Buzzer(6)  # Pin for buzzer
 
 # Event to signal time-setting mode
 time_setting_event = Event()
@@ -64,40 +69,59 @@ def nfc_scan():
 
 # Function to handle student data update
 def handle_student(uid_hex, current_time):
+    # Reset LEDs and buzzer
+    red_led.off()
+    green_led.off()
+    buzzer.off()
+
     # Fetch student details from the database
-    response = requests.get(database_url, params={"auth": api_key})
+    response = requests.get(database_url + "students.json", params={"auth": api_key})
     if response.status_code == 200:
         students_data = response.json()
         if uid_hex in students_data:
             student = students_data[uid_hex]
             scheduled_time = student['scheduled_time']
             current_hour_minute = time.strftime("%H:%M", time.localtime(current_time))
-           
+
             # Determine if the student is on time or late
             status = "On Time" if current_hour_minute <= scheduled_time else "Late"
-           
+
             # Update the student's status
             student['status'] = status
             student['scan_time'] = current_hour_minute
-           
+
             # Update the database with the new status
-            update_url = f"https://smart-attendence-system-c957c-default-rtdb.asia-southeast1.firebasedatabase.app/students/{uid_hex}.json"
+            update_url = database_url + f"students/{uid_hex}.json"
             update_response = requests.patch(update_url, params={"auth": api_key}, json=student)
-           
+
             if update_response.status_code == 200:
                 print(f"Updated student status: {student['name']} is {status}.")
+                # Control LEDs based on status
+                if status == "On Time":
+                    green_led.on()
+                    time.sleep(5)
+                    green_led.off()
+                else:
+                    red_led.on()
+                    time.sleep(5)
+                    red_led.off()
             else:
                 print(f"Failed to update status for {student['name']}.")
         else:
             print(f"No student found for UID: {uid_hex}")
+            buzzer.on()
+            time.sleep(5)
+            buzzer.off()
     else:
         print("Failed to fetch student data from the database.")
+        buzzer.on()
+        time.sleep(5)
+        buzzer.off()
 
 # Function to detect keypresses
 def detect_keys():
     entered_time = []
     print("Entering time-setting mode. Press keys to input time, '#' to confirm.")
-   
     while True:
         for col_index, col in enumerate(cols):
             col.on()
@@ -113,30 +137,19 @@ def detect_keys():
                         print(f"Entered: {''.join(entered_time)}")
             col.off()
         time.sleep(0.1)
-       
-def convert_HHMM_to_HH_colon_MM(time_str):
-    if len(time_str) == 4 and time_str.isdigit():
-        return time_str[:2] + ":" + time_str[2:]
-    else:
-        return None  # or raise an error / handle invalid input
-
 
 # Function to finalize time
 def finalize_time(time_str):
     if len(time_str) == 4 and time_str.isdigit():
-        formatted_time = convert_HHMM_to_HH_colon_MM(time_str)
-        if formatted_time is None:
-            print("Invalid time format.")
-            return
-
+        formatted_time = f"{time_str[:2]}:{time_str[2:]}"
         print(f"Finalized Time: {formatted_time}")
         try:
-            response = requests.get(database_url, params={"auth": api_key})
+            response = requests.get(database_url + "students.json", params={"auth": api_key})
             if response.status_code == 200:
                 students_data = response.json()
                 for uid, student in students_data.items():
-                    student['scheduled_time'] = formatted_time  # Use formatted time here
-                    update_url = f"https://smart-attendence-system-c957c-default-rtdb.asia-southeast1.firebasedatabase.app/students/{uid}.json"
+                    student['scheduled_time'] = formatted_time
+                    update_url = database_url + f"students/{uid}.json"
                     patch_response = requests.patch(update_url, params={"auth": api_key}, json=student)
                     if patch_response.status_code != 200:
                         print(f"Failed to update student {student.get('name', uid)}")
@@ -147,39 +160,9 @@ def finalize_time(time_str):
             print("Error updating time:", e)
     else:
         print("Invalid time format. Please enter time in HHMM format.")
-   
-    time_setting_event.clear()
+        time_setting_event.clear()
 
-# Updated interrupt handler for '*'
-def handle_star_interrupt():
-    print("Star key pressed. Switching to time-setting mode.")
-    time_setting_event.set()
-    detect_keys()
-    # After time-setting, return to NFC scanning
-    print("Exiting time-setting mode. Resuming NFC scanning.")
-
-# NFC scanning function with event handling
-def nfc_scan():
-    print('Waiting for NFC card...')
-    while True:  # Keep scanning in an infinite loop
-        if time_setting_event.is_set():
-            # Pause NFC scanning while in time-setting mode
-            time.sleep(0.1)
-            continue
-       
-        uid = pn532.read_passive_target(timeout=0.5)
-        if uid is not None:
-            uid_hex = ''.join([hex(i)[2:].zfill(2).upper() for i in uid])  # Convert UID to a string
-            current_time = time.time()
-
-            if uid_hex not in last_scanned or current_time - last_scanned[uid_hex] > UID_TIMEOUT:
-                last_scanned[uid_hex] = current_time  # Update the last scanned time
-                print(f'Found card with UID: {uid_hex}')
-                handle_student(uid_hex, current_time)
-            else:
-                print(f"UID {uid_hex} was scanned recently. Ignoring.")
-
-# Monitor '*' keypress
+# Monitor '*' keypress for time-setting mode
 def monitor_star_key():
     while True:
         for col_index, col in enumerate(cols):
@@ -189,7 +172,10 @@ def monitor_star_key():
                 if row.value:
                     key = key_map.get((row_pins[row_index], col_pins[col_index]))
                     if key == "*":
-                        handle_star_interrupt()
+                        print("Star key pressed. Switching to time-setting mode.")
+                        time_setting_event.set()
+                        detect_keys()
+                        print("Exiting time-setting mode. Resuming NFC scanning.")
                         return
             col.off()
         time.sleep(0.1)
