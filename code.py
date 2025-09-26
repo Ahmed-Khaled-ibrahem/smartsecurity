@@ -1,105 +1,107 @@
-const int trigPin = 8;
-const int echoPin = 9;
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <DHT.h>
 
-const int motor1Pin1 = 2;
-const int motor1Pin2 = 3;
-const int motor2Pin1 = 4;
-const int motor2Pin2 = 5;
-const int enable1Pin = 6;
-const int enable2Pin = 7;
+// ====== LCD ======
+LiquidCrystal_I2C lcd(0x27, 16, 2);  // Adjust 0x27 if your LCD has different address
 
-const int relayPin = 10;
+// ====== DHT11 ======
+#define DHTPIN 2  // DHT11 data pin
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
 
-const int carSpeed = 150;     // Range: 0 - 255
-const int stopDistance = 20;  // cm
+// ====== Pins ======
+#define BUZZER_PIN 3
+#define RED_PIN 4
+#define GREEN_PIN 5
+#define BLUE_PIN 6    // not used, but kept if you want blue later
+#define SIGNAL_PIN 7  // Digital input 5V signal
 
-bool startSequence = false;
-
-const int buttonPin = 11;
+// ====== Variables ======
+unsigned long lastRead = 0;
+const unsigned long readInterval = 2000;  // every 2 seconds
 
 void setup() {
-
+  // Initialize Serial (optional)
   Serial.begin(9600);
 
-  pinMode(trigPin, OUTPUT);
-  pinMode(echoPin, INPUT);
+  // Initialize LCD
+  lcd.init();
+  lcd.backlight();
+  lcd.clear();
 
-  pinMode(buttonPin, INPUT);
+  // DHT sensor
+  dht.begin();
 
-  pinMode(motor1Pin1, OUTPUT);
-  pinMode(motor1Pin2, OUTPUT);
-  pinMode(motor2Pin1, OUTPUT);
-  pinMode(motor2Pin2, OUTPUT);
-  pinMode(enable1Pin, OUTPUT);
-  pinMode(enable2Pin, OUTPUT);
+  // Pins
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(RED_PIN, OUTPUT);
+  pinMode(GREEN_PIN, OUTPUT);
+  pinMode(BLUE_PIN, OUTPUT);
+  pinMode(SIGNAL_PIN, INPUT);
 
-  pinMode(relayPin, OUTPUT);
-  digitalWrite(relayPin, LOW);
-  Serial.println("Code is starting");
+  // Start with everything off
+  digitalWrite(BUZZER_PIN, LOW);
+  digitalWrite(RED_PIN, LOW);
+  digitalWrite(GREEN_PIN, LOW);
+  digitalWrite(BLUE_PIN, LOW);
+
+  lcd.setCursor(0, 0);
+  lcd.print("System Starting...");
+  delay(2000);
+  lcd.clear();
 }
-
 
 void loop() {
-  handleButtonPress();
-  if (startSequence) {
-    moveForward(carSpeed);
-    long distance = getDistance();
+  int signalState = digitalRead(SIGNAL_PIN);
 
-    if (distance <= stopDistance) {
-      stopMotors();
-      delay(500);
-      digitalWrite(relayPin, HIGH);
-      startSequence = false;
+  if (signalState == HIGH) {
+    // ✅ Normal: Electricity ON
+    if (millis() - lastRead > readInterval) {
+      lastRead = millis();
+
+      float temp = dht.readTemperature();
+      float hum = dht.readHumidity();
+
+      lcd.clear();
+      if (isnan(temp) || isnan(hum)) {
+        lcd.setCursor(0, 0);
+        lcd.print("DHT Error!");
+      } else {
+        lcd.setCursor(0, 0);
+        lcd.print("Temp: ");
+        lcd.print(temp, 1);
+        lcd.print((char)223);  // ° symbol
+        lcd.print("C");
+
+        lcd.setCursor(0, 1);
+        lcd.print("Hum:  ");
+        lcd.print(hum, 1);
+        lcd.print("%");
+      }
+
+      // Green LED ON
+      digitalWrite(GREEN_PIN, HIGH);
+      digitalWrite(RED_PIN, LOW);
+
+      // Buzzer OFF
+      digitalWrite(BUZZER_PIN, LOW);
     }
+  } else {
+    // ❌ Electricity DOWN
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("ELECTRICITY");
+    lcd.setCursor(0, 1);
+    lcd.print("DOWN!");
+
+    // Red LED ON
+    digitalWrite(RED_PIN, HIGH);
+    digitalWrite(GREEN_PIN, LOW);
+
+    // Buzzer ON
+    digitalWrite(BUZZER_PIN, HIGH);
+
+    delay(500);  // Prevent LCD flickering
   }
-}
-
-
-void handleButtonPress() {
-
-  if (digitalRead(buttonPin) == HIGH) {
-    while (digitalRead(buttonPin) == HIGH) {
-      delay(5);
-    }
-    startSequence = true;
-    Serial.println("Button pressed. Starting sequence...");
-  }
-}
-
-long getDistance() {
-  digitalWrite(trigPin, LOW);
-  delayMicroseconds(2);
-
-  digitalWrite(trigPin, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(trigPin, LOW);
-
-  long duration = pulseIn(echoPin, HIGH);
-  long distanceCm = duration * 0.034 / 2;
-
-  Serial.print("Distance: ");
-  Serial.print(distanceCm);
-  Serial.println(" cm");
-
-  return distanceCm;
-}
-
-void moveForward(int speed) {
-  digitalWrite(motor1Pin1, HIGH);
-  digitalWrite(motor1Pin2, LOW);
-  digitalWrite(motor2Pin1, HIGH);
-  digitalWrite(motor2Pin2, LOW);
-
-  analogWrite(enable1Pin, speed);
-  analogWrite(enable2Pin, speed);
-}
-
-void stopMotors() {
-  digitalWrite(motor1Pin1, LOW);
-  digitalWrite(motor1Pin2, LOW);
-  digitalWrite(motor2Pin1, LOW);
-  digitalWrite(motor2Pin2, LOW);
-
-  analogWrite(enable1Pin, 0);
-  analogWrite(enable2Pin, 0);
 }
