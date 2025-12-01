@@ -1,60 +1,109 @@
 #include <Wire.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
+#include <LiquidCrystal_I2C.h>
 
-// OLED display size
-#define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 64
+// ESP32 I2C pins (default)
+#define SDA_PIN 21
+#define SCL_PIN 22
 
-// I2C address (usually 0x3C)
-#define OLED_ADDR 0x3C
+LiquidCrystal_I2C lcd(0x27, 16, 2);
 
-// Create display object
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+// Choose ANY GPIO pins
+const int ledPin = 18;
+const int buzzerPin = 19;
+
+int inhaleTime = 4000;
+int holdTime   = 4000;
+int exhaleTime = 4000;
+const int maxTime = 10000;
 
 void setup() {
-  Serial.begin(9600);
+  // Initialize I2C for ESP32
+  Wire.begin(SDA_PIN, SCL_PIN);
 
-  // Initialize OLED
-  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
-    Serial.println("SSD1306 allocation failed");
-    for (;;);
+  lcd.init();
+  lcd.backlight();
+
+  pinMode(ledPin, OUTPUT);
+  pinMode(buzzerPin, OUTPUT);
+
+  digitalWrite(ledPin, LOW);
+  digitalWrite(buzzerPin, LOW);
+}
+
+// Short beep
+void bipShort() {
+  digitalWrite(buzzerPin, HIGH);
+  delay(100);
+  digitalWrite(buzzerPin, LOW);
+}
+
+// INHALE – display only
+void inhalePhase(int duration) {
+  int seconds = duration / 1000;
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Inhale...");
+
+  for (int i = seconds; i > 0; i--) {
+    lcd.setCursor(0, 1);
+    lcd.print("Time: ");
+    lcd.print(i);
+    lcd.print("s ");
+    delay(1000);
   }
+}
 
-  display.clearDisplay();
+// HOLD – beep + LED flash every second
+void holdPhase(int duration) {
+  int seconds = duration / 1000;
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Hold...");
 
-  // Test 1: Draw text
-  display.setTextSize(2);              // Text size
-  display.setTextColor(SSD1306_WHITE); // Text color
-  display.setCursor(0, 0);             // Start at top-left
-  display.println("Hello!");
-  display.display();
-  delay(2000);
+  for (int i = seconds; i > 0; i--) {
+    lcd.setCursor(0, 1);
+    lcd.print("Time: ");
+    lcd.print(i);
+    lcd.print("s ");
 
-  // Test 2: Draw shapes
-  display.clearDisplay();
-  display.drawRect(10, 10, 50, 30, SSD1306_WHITE);  // rectangle
-  display.fillCircle(80, 30, 10, SSD1306_WHITE);    // circle
-  display.display();
-  delay(2000);
+    bipShort();
+    digitalWrite(ledPin, HIGH);
+    delay(300);
+    digitalWrite(ledPin, LOW);
+    delay(700);
+  }
+}
 
-  // Test 3: Scrolling text
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setCursor(0, 0);
-  display.println("Scrolling text demo");
-  display.display();
-  display.startscrollright(0x00, 0x0F);
-  delay(3000);
-  display.stopscroll();
+// EXHALE – display only
+void exhalePhase(int duration) {
+  int seconds = duration / 1000;
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Exhale...");
+
+  for (int i = seconds; i > 0; i--) {
+    lcd.setCursor(0, 1);
+    lcd.print("Time: ");
+    lcd.print(i);
+    lcd.print("s ");
+    delay(1000);
+  }
 }
 
 void loop() {
-  // Blink a message every second
-  display.clearDisplay();
-  display.setTextSize(2);
-  display.setCursor(10, 20);
-  display.println("Nano OLED!");
-  display.display();
-  delay(1000);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Breathe calmly...");
+  delay(2000);
+
+  inhalePhase(inhaleTime);
+  holdPhase(holdTime);
+  exhalePhase(exhaleTime);
+
+  delay(2000);
+
+  // Increase gradually to 10 seconds
+  if (inhaleTime < maxTime) inhaleTime += 1000;
+  if (holdTime < maxTime)   holdTime += 1000;
+  if (exhaleTime < maxTime) exhaleTime += 1000;
 }
