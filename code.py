@@ -1,363 +1,270 @@
-import cv2
-import numpy as np
-import mediapipe as mp
-from aiortc import VideoStreamTrack, RTCPeerConnection, RTCSessionDescription
-from av import VideoFrame
-from picamera2 import Picamera2
-import asyncio, json, aiohttp, aiohttp.web, time
-import firebase_admin
-from firebase_admin import credentials, db
-import requests, sseclient
-import threading
-from collections.abc import MutableMapping
-import pyrebase
 import RPi.GPIO as GPIO
 import time
-import threading
-from mpu6050 import mpu6050
+import pygame
+import sys
 
-# Pins
-BUZZER_PIN = 27
-RELAY_PIN = 17
+# -----------------------------
+# GPIO PINS
+# -----------------------------
+TX_PINS = [17, 18, 27, 22, 23, 24, 25, 5]
+RX_PINS = [6, 12, 13, 16, 19, 20, 21, 26]
 
-# Setup GPIO
-GPIO.setmode(GPIO.BCM)
-GPIO.setwarnings(False)   # suppress reuse warnings
-GPIO.setup(BUZZER_PIN, GPIO.OUT)
-GPIO.setup(RELAY_PIN, GPIO.OUT)
+BUTTON_PIN = 7  # Start test button
+SWITCH_PIN = 8  # Mode switch
 
-# Setup MPU6050
-mpu = mpu6050(0x68)
-
-# Accident detection function
-def detect_accident():
-    senstivity = 14  # Adjust sensitivity as needed
-    accel = mpu.get_accel_data()
-    ax, ay, az = accel['x'], accel['y'], accel['z']
-    upside_down = az < -7
-    sudden_move = abs(ax) > senstivity or abs(ay) > senstivity or abs(az) > senstivity
-    if upside_down or sudden_move:
-        print("🚨 Accident Detected!")
-        buzzer_queick_beep()
-        if alerts and contacts_flag:
-            buzzer_queick_beep()
-            notify_all_contacts() 
-
-
-alerts = False;
-buzzer = False;
-contacts_flag = False;
-vibration = False;
-contactsList = [];
-alertState = False;
-
-
-def buzzer_queick_beep():
-    GPIO.output(BUZZER_PIN, GPIO.HIGH)
-    GPIO.output(RELAY_PIN, GPIO.HIGH)
-
-    time.sleep(0.1)
-    GPIO.output(BUZZER_PIN, GPIO.LOW)
-    GPIO.output(RELAY_PIN, GPIO.LOW)
-
-    time.sleep(0.1)
-    GPIO.output(BUZZER_PIN, GPIO.HIGH)
-    GPIO.output(RELAY_PIN, GPIO.HIGH)
-
-    time.sleep(0.1)
-    GPIO.output(BUZZER_PIN, GPIO.LOW)
-    GPIO.output(RELAY_PIN, GPIO.LOW)
-
-
-TELEGRAM_BOT_TOKEN = "8268822841:AAFIb7dUXPMNk3soX9d0TmtVxMzk6S-2RH4"
-
-def send_telegram_message(chat_id, text):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text
-    }
-    response = requests.post(url, data=payload)
-    return response.json()
-
-def notify_all_contacts():
-    contacts_ref = db.reference("contacts")
-    contacts = contacts_ref.get()
-
-    if not contacts:
-        print("No contacts found.")
-        return
-
-    for key, contact in contacts.items():
-        if not contact.get("active", False):
-            continue
-
-        chat_id = contact.get("chatId")
-        name = contact.get("userName")
-
-        if not chat_id:
-            print(f"Skipping {key}: No chatId")
-            continue
-
-        msg = f"Hello {name}, this is a alert from DriveSense system 🚨.\nA possible accident has been detected. Please check on the driver immediately!"
-        result = send_telegram_message(chat_id, msg)
-
-        print(f"Sent to {name} ({chat_id}): {result}")
-
-
-# ----- Your Detection Class -----
-class DrowsinessDetector:
-    def __init__(self):
-        self.face_mesh = mp.solutions.face_mesh.FaceMesh(
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
-        self.LEFT_EYE = [33, 160, 158, 133, 153, 144]
-        self.RIGHT_EYE = [362, 385, 387, 263, 373, 380]
-        self.EYE_AR_THRESH = 0.25
-        self.EYE_AR_CONSEC_FRAMES = 20
-        self.counter = 0
-        self.status_text = "No Face Detected"
-
-    def eye_aspect_ratio(self, eye_points, landmarks, w, h):
-        pts = [(int(landmarks[p].x * w), int(landmarks[p].y * h)) for p in eye_points]
-        A = np.linalg.norm(np.array(pts[1]) - np.array(pts[5]))
-        B = np.linalg.norm(np.array(pts[2]) - np.array(pts[4]))
-        C = np.linalg.norm(np.array(pts[0]) - np.array(pts[3]))
-        return (A + B) / (2.0 * C), pts
-
-    def process(self, frame):
-        h, w, _ = frame.shape
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = self.face_mesh.process(rgb)
-
-        if results.multi_face_landmarks:
-            for face_landmarks in results.multi_face_landmarks:
-                leftEAR, leftPts = self.eye_aspect_ratio(self.LEFT_EYE, face_landmarks.landmark, w, h)
-                rightEAR, rightPts = self.eye_aspect_ratio(self.RIGHT_EYE, face_landmarks.landmark, w, h)
-                ear = (leftEAR + rightEAR) / 2.0
-
-                # Draw eyes
-                for (x, y) in leftPts + rightPts:
-                    cv2.circle(frame, (x, y), 1, (0, 255, 0), -1)
-
-                if ear < self.EYE_AR_THRESH:
-                    self.counter += 1
-                    if self.counter >= self.EYE_AR_CONSEC_FRAMES:
-                        self.status_text = "DROWSINESS ALERT!"
-                        print("Drowsiness Detected!")
-                        asyncio.create_task(updateDatabaseDetection(True))
-                else:
-                    self.counter = 0
-                    self.status_text = "Normal"
-                    asyncio.create_task(updateDatabaseDetection(False))
-
-        else:
-            self.status_text = "No Face Detected"
-            asyncio.create_task(updateDatabaseDetection(False))
-
-        # Overlay text
-        # cv2.putText(frame, f"Status: {self.status_text}", (10, 30),
-        #             cv2.FONT_HERSHEY_SIMPLEX, 0.8,
-        #             (0, 0, 255) if "ALERT" in self.status_text else (0, 255, 0), 2)
-        return frame
-
-async def updateDatabaseDetection(detected):
-    global helper, alerts, buzzer, vibration
-
-    if detected and buzzer:
-        GPIO.output(BUZZER_PIN, GPIO.HIGH)
-    else:
-        GPIO.output(BUZZER_PIN, GPIO.LOW)
-
-    if detected and vibration:
-        GPIO.output(RELAY_PIN, GPIO.HIGH)
-    else:
-        GPIO.output(RELAY_PIN, GPIO.LOW)
-
-    if alerts == True :
-        global alertState
-        if detected != alertState:
-            print("Updating detection status in Firebase:", detected)
-            helper.update("live", {"detected": detected})
-            alertState = detected
-
-# ----- WebRTC Video Track -----
-class CameraStreamTrack(VideoStreamTrack):
-    def __init__(self, picam2):
-        super().__init__()
-        self.picam2 = picam2
-        self.detector = DrowsinessDetector()
-
-
-    async def recv(self):
-        frame = self.picam2.capture_array()
-        frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
-        # Run AI detection
-        frame = self.detector.process(frame)
-        # Convert to WebRTC VideoFrame
-        video_frame = VideoFrame.from_ndarray(frame, format="bgr24")
-        video_frame.pts, video_frame.time_base = await self.next_timestamp()
-        return video_frame
-
-class FirebaseHelper:
-    def __init__(self, cred_path, db_url, pyrebase_config):
-        # Firebase Admin SDK for writes/reads
-        cred = credentials.Certificate(cred_path)
-        if not firebase_admin._apps:
-            firebase_admin.initialize_app(cred, {
-                'databaseURL': db_url
-            })
-        self.ref = db.reference("/")
-        
-        # Pyrebase for streaming/listening
-        self.firebase = pyrebase.initialize_app(pyrebase_config)
-        self.pb_db = self.firebase.database()
-
-    def write(self, path, value):
-        """Write data to a specific path"""
-        self.ref.child(path).set(value)
-
-    def update(self, path, value_dict):
-        """Update values at a path"""
-        if not isinstance(value_dict, dict) or not value_dict:
-            raise ValueError("Value argument must be a non-empty dictionary.")
-        self.ref.child(path).update(value_dict)
-
-    def read(self, path):
-        """Read data from a path"""
-        return self.ref.child(path).get()
-
-    def listen(self, callback):
-        def stream_handler(message):
-            callback(message)
-        # self.pb_db.child(path).stream(stream_handler)
-        self.pb_db.stream(stream_handler)
-
-picam2 = Picamera2()
-config = picam2.create_video_configuration(main={"size": (640, 480)})
-picam2.configure(config)
-
-# ----- WebRTC Signaling -----
-async def offer(request):
-    params = await request.json()
-    pc = RTCPeerConnection()
-    # Create a single Picamera2 instance
-    picam2.start()
-    pc.addTrack(CameraStreamTrack(picam2))
-
-    await pc.setRemoteDescription(RTCSessionDescription(sdp=params["sdp"], type=params["type"]))
-    answer = await pc.createAnswer()
-    await pc.setLocalDescription(answer)
-
-    return aiohttp.web.Response(
-        content_type="application/json",
-        text=json.dumps({"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}),
-    )
-
-def on_change(message):
-    global contacts_flag, alerts, buzzer, vibration
-
-    print("Path:", message["path"])
-    print("Data:", message["data"])
-    if message["path"] == "/": 
-        data = message["data"]["settings"]
-        alerts = data.get("alerts")
-        buzzer = data.get("buzzer")
-        contacts_flag = data.get("contacts")
-        vibration = data.get("vibration")
-
-    if message["path"] == "/settings":
-        
-        if message["data"].get("contacts") != None:
-            contacts_flag = message["data"].get("contacts")
-        if message["data"].get("alerts")!= None :
-            alerts = message["data"].get("alerts")
-        if message["data"].get("buzzer")!= None:
-            buzzer = message["data"].get("buzzer")
-        if message["data"].get("vibration")!= None:
-            vibration = message["data"].get("vibration")
-
-        # print(f"Contacts setting updated: {contacts_flag}")
-        # print(f"Alerts setting updated: {alerts}")
-        # print(f"Buzzer setting updated: {buzzer}")
-        # print(f"Vibration setting updated: {vibration}")
-        
-    if message["path"] == "/raspi/status/online":
-        status = message["data"]
-        if not status:
-            helper.update("raspi/status", {"online": True})
-
-def get_ngrok_url():
-    try:
-        # ngrok's local API endpoint
-        response = requests.get("http://127.0.0.1:4040/api/tunnels")
-        data = response.json()
-        
-        # Loop through tunnels and find the http tunnel
-        for tunnel in data.get("tunnels", []):
-            if tunnel.get("proto") == "https":
-                return tunnel.get("public_url")
-        
-        # fallback: return first tunnel if no https found
-        if data.get("tunnels"):
-            return data["tunnels"][0].get("public_url")
-        
-        return None
-    except Exception as e:
-        print("Error getting ngrok URL:", e)
-        return None
-
-def sensor_loop():
-    while True:
-        detect_accident()
-        time.sleep(0.2)
-
-pyrebase_config = {
-    "apiKey": "AIzaSyClsZ-ZxaQUUKvn0KHHnOw4lNEjxYIyYv8",
-    "authDomain": "smartparking-12902.firebaseapp.com",
-    "databaseURL": "https://smartparking-12902-default-rtdb.firebaseio.com",
-    "storageBucket": "smartparking-12902.firebasestorage.app",
+CROSS_MAP = {
+    0: 2,
+    1: 5,
+    2: 0,
+    3: 3,
+    4: 4,
+    5: 1,
+    6: 6,
+    7: 7
 }
 
-helper = FirebaseHelper(
-    cred_path="serviceAccountKey.json",
-    db_url="https://smartparking-12902-default-rtdb.firebaseio.com",
-    pyrebase_config=pyrebase_config
-)
+# -----------------------------
+# GPIO SETUP
+# -----------------------------
+GPIO.setmode(GPIO.BCM)
+GPIO.setwarnings(False)
 
-# ----- Run Web Server -----
-app = aiohttp.web.Application()
+def setup_gpio():
+    # TX pins idle HIGH
+    for pin in TX_PINS:
+        GPIO.setup(pin, GPIO.OUT)
+        GPIO.output(pin, GPIO.HIGH)
 
-app.router.add_post("/offer", offer)
+    # RX pins with PULL-UP
+    for pin in RX_PINS:
+        GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
-if __name__ == "__main__":
-    # Write value
-    helper.write("raspi/status", {"online": True})
-    # Read value
-    print("Current status:", helper.read("live/active"))
-    # Update part of path
-    helper.update("live", {"active": True})
+    # Buttons
+    GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    GPIO.setup(SWITCH_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
-    # Start thread
-    thread = threading.Thread(target=sensor_loop, daemon=True)
-    thread.start()
+def cleanup():
+    GPIO.cleanup()
 
-    # Create the listener thread
-    listener_thread = threading.Thread(
-        target=helper.listen,
-        args=(on_change,),
-        daemon=True  # Daemon so it exits when main program exits
-    )
+# -----------------------------
+# CABLE SCAN FUNCTION
+# -----------------------------
+def scan_connections(delay=0.01):
+    """
+    Returns mapping:
+    { tx_index: [rx_index, ...] }
+    """
+    mapping = {}
 
-    # Start listening in background
-    listener_thread.start()
-    # Listen for changes
-    url = get_ngrok_url()
-    if url:
-        print("Ngrok public URL:", url)
-        helper.update("live", {"url": url})
-        aiohttp.web.run_app(app, port=8080)
+    # Ensure idle
+    for pin in TX_PINS:
+        GPIO.output(pin, GPIO.HIGH)
+
+    for tx_index, tx_pin in enumerate(TX_PINS):
+        GPIO.output(tx_pin, GPIO.LOW)  # drive active
+        time.sleep(delay)
+
+        connected = []
+        for rx_index, rx_pin in enumerate(RX_PINS):
+            if GPIO.input(rx_pin) == GPIO.LOW:  # active connection
+                connected.append(rx_index)
+
+        mapping[tx_index] = connected
+        GPIO.output(tx_pin, GPIO.HIGH)  # reset to idle
+
+    return mapping
+
+# -----------------------------
+# PYGAME UI SETUP
+# -----------------------------
+pygame.init()
+screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+WIDTH, HEIGHT = screen.get_size()
+
+FONT = pygame.font.SysFont("arial", 24)
+FONT_SMALL = pygame.font.SysFont("arial", 20)
+BIG = pygame.font.SysFont("arial", 56, bold=True)
+TITLE_FONT = pygame.font.SysFont("arial", 36, bold=True)
+
+WHITE = (255, 255, 255)
+BLACK = (30, 30, 30)
+DARK_GRAY = (60, 60, 60)
+LIGHT_GRAY = (220, 220, 220)
+BLUE = (41, 128, 185)
+GREEN = (39, 174, 96)
+RED = (231, 76, 60)
+ORANGE = (243, 156, 18)
+ACCENT = (52, 152, 219)
+
+LEFT_X = 250
+RIGHT_X = WIDTH - 250
+TOP_Y = 200
+SPACING = 50
+
+# -----------------------------
+# DRAWING HELPERS
+# -----------------------------
+def draw_rounded_rect(surface, color, rect, radius=15):
+    pygame.draw.rect(surface, color, rect, border_radius=radius)
+
+def draw_button(x, y, width, height, text, color, hover=False):
+    button_rect = pygame.Rect(x, y, width, height)
+    shadow_rect = pygame.Rect(x + 3, y + 3, width, height)
+    draw_rounded_rect(screen, DARK_GRAY, shadow_rect, 12)
+    btn_color = tuple(min(c + 20, 255) for c in color) if hover else color
+    draw_rounded_rect(screen, btn_color, button_rect, 12)
+    txt = FONT.render(text, True, WHITE)
+    txt_rect = txt.get_rect(center=button_rect.center)
+    screen.blit(txt, txt_rect)
+    return button_rect
+
+def draw_status_badge(x, y, text, color):
+    padding = 20
+    txt = FONT_SMALL.render(text, True, WHITE)
+    badge_width = txt.get_width() + padding * 2
+    badge_height = 35
+    badge_rect = pygame.Rect(x, y, badge_width, badge_height)
+    draw_rounded_rect(screen, color, badge_rect, 17)
+    txt_rect = txt.get_rect(center=badge_rect.center)
+    screen.blit(txt, txt_rect)
+    return badge_width
+
+def draw_pins(x, label):
+    label_txt = TITLE_FONT.render(label, True, BLACK)
+    label_rect = label_txt.get_rect(center=(x, TOP_Y - 80))
+    screen.blit(label_txt, label_rect)
+
+    positions = []
+    for i in range(8):
+        y = TOP_Y + i * SPACING
+        pygame.draw.circle(screen, DARK_GRAY, (x + 2, y + 2), 18)  # shadow
+        pygame.draw.circle(screen, ACCENT, (x, y), 18)
+        pygame.draw.circle(screen, WHITE, (x, y), 15)
+        pygame.draw.circle(screen, ACCENT, (x, y), 8)
+        num_txt = FONT.render(str(i + 1), True, BLACK)
+        num_bg_rect = pygame.Rect(x - 60, y - 15, 40, 30)
+        draw_rounded_rect(screen, LIGHT_GRAY, num_bg_rect, 8)
+        screen.blit(num_txt, (x - 50, y - 12))
+        positions.append((x, y))
+    return positions
+
+def draw_connections(left_pos, right_pos, mapping, mode):
+    for tx, rxs in mapping.items():
+        for rx in rxs:
+            if mode == "STRAIGHT":
+                color = GREEN if len(rxs) == 1 and rx == tx else RED
+            else:
+                expected_rx = CROSS_MAP.get(tx)
+                color = GREEN if len(rxs) == 1 and rx == expected_rx else RED
+            width = 5
+            pygame.draw.line(screen, (*color[:3], 100), left_pos[tx], right_pos[rx], width + 4)
+            pygame.draw.line(screen, color, left_pos[tx], right_pos[rx], width)
+
+def draw_result_panel(status):
+    panel_width = 600
+    panel_height = 150
+    panel_x = 30
+    panel_y = HEIGHT - panel_height - 30
+    shadow_rect = pygame.Rect(panel_x + 5, panel_y + 5, panel_width, panel_height)
+    draw_rounded_rect(screen, DARK_GRAY, shadow_rect, 20)
+    color = GREEN if status == "PASS" else RED if status == "FAIL" else LIGHT_GRAY
+    panel_rect = pygame.Rect(panel_x, panel_y, panel_width, panel_height)
+    draw_rounded_rect(screen, color, panel_rect, 20)
+
+    if status == "PASS":
+        check_center = (panel_x + 80, panel_y + panel_height // 2)
+        pygame.draw.circle(screen, WHITE, check_center, 45, 6)
+        points = [
+            (check_center[0] - 15, check_center[1]),
+            (check_center[0] - 5, check_center[1] + 15),
+            (check_center[0] + 20, check_center[1] - 15)
+        ]
+        pygame.draw.lines(screen, WHITE, False, points, 8)
+        result_txt = BIG.render("CONNECTION OK", True, WHITE)
+    elif status == "FAIL":
+        x_center = (panel_x + 80, panel_y + panel_height // 2)
+        pygame.draw.circle(screen, WHITE, x_center, 45, 6)
+        pygame.draw.line(screen, WHITE, (x_center[0] - 15, x_center[1] - 15),
+                         (x_center[0] + 15, x_center[1] + 15), 8)
+        pygame.draw.line(screen, WHITE, (x_center[0] + 15, x_center[1] - 15),
+                         (x_center[0] - 15, x_center[1] + 15), 8)
+        result_txt = BIG.render("CABLE FAULT", True, WHITE)
     else:
-        print("No ngrok URL found")
-        GPIO.cleanup()
+        result_txt = TITLE_FONT.render("Ready to Test", True, DARK_GRAY)
+
+    txt_rect = result_txt.get_rect(center=(panel_x + panel_width // 2 + 60, panel_y + panel_height // 2))
+    screen.blit(result_txt, txt_rect)
+
+# -----------------------------
+# MAIN LOOP
+# -----------------------------
+setup_gpio()
+connections = {}
+test_mode = "STRAIGHT"
+last_button_state = GPIO.HIGH
+button_pressed = False
+
+while True:
+    screen.fill(WHITE)
+
+    # Read button
+    current_button_state = GPIO.input(BUTTON_PIN)
+    if current_button_state == GPIO.LOW and last_button_state == GPIO.HIGH:
+        button_pressed = True
+    last_button_state = current_button_state
+
+    # Read switch
+    switch_state = GPIO.input(SWITCH_PIN)
+    test_mode = "STRAIGHT" if switch_state == GPIO.LOW else "CROSS"
+
+    # Event handling
+    mouse_pos = pygame.mouse.get_pos()
+    test_btn_rect = pygame.Rect(WIDTH // 2 - 100, HEIGHT - 120, 200, 60)
+    exit_btn_rect = pygame.Rect(WIDTH - 180, HEIGHT - 80, 150, 50)
+
+    for event in pygame.event.get():
+        if event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_ESCAPE:
+                cleanup()
+                pygame.quit()
+                sys.exit()
+        elif event.type == pygame.MOUSEBUTTONDOWN:
+            if test_btn_rect.collidepoint(mouse_pos):
+                button_pressed = True
+            elif exit_btn_rect.collidepoint(mouse_pos):
+                cleanup()
+                pygame.quit()
+                sys.exit()
+
+    # Perform test
+    if button_pressed:
+        connections = scan_connections()
+        button_pressed = False
+
+    # Draw UI
+    title = TITLE_FONT.render("CABLE TESTER PRO", True, BLACK)
+    screen.blit(title, (WIDTH // 2 - title.get_width() // 2, 20))
+    mode_color = BLUE if test_mode == "STRAIGHT" else ORANGE
+    draw_status_badge(30, 30, f"MODE: {test_mode}", mode_color)
+
+    left_positions = draw_pins(LEFT_X, "TX (Side A)")
+    right_positions = draw_pins(RIGHT_X, "RX (Side B)")
+
+    if connections:
+        draw_connections(left_positions, right_positions, connections, test_mode)
+        # Determine status
+        if test_mode == "STRAIGHT":
+            status = "PASS" if all(len(v) == 1 and v[0] == k for k, v in connections.items()) else "FAIL"
+        else:
+            status = "PASS" if all(len(v) == 1 and v[0] == CROSS_MAP[k] for k, v in connections.items()) else "FAIL"
+        draw_result_panel(status)
+    else:
+        draw_result_panel("READY")
+
+    # Draw buttons
+    test_hover = test_btn_rect.collidepoint(mouse_pos)
+    draw_button(WIDTH // 2 - 100, HEIGHT - 120, 200, 60, "TEST CABLE", ACCENT, test_hover)
+    exit_hover = exit_btn_rect.collidepoint(mouse_pos)
+    draw_button(WIDTH - 180, HEIGHT - 80, 150, 50, "EXIT", RED, exit_hover)
+
+    pygame.display.flip()
