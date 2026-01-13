@@ -10,7 +10,7 @@ TX_PINS = [17, 18, 27, 22, 23, 24, 25, 5]
 RX_PINS = [6, 12, 13, 16, 19, 20, 21, 26]
 
 BUTTON_PIN = 7  # Start test button
-SWITCH_PIN = 8  # Mode switch
+# SWITCH_PIN = 8  # Removed: No longer needed for manual mode selection
 
 CROSS_MAP = {
     0: 2,
@@ -39,9 +39,8 @@ def setup_gpio():
     for pin in RX_PINS:
         GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
-    # Buttons
+    # Button
     GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-    GPIO.setup(SWITCH_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
 def cleanup():
     GPIO.cleanup()
@@ -153,46 +152,52 @@ def draw_connections(left_pos, right_pos, mapping, mode):
         for rx in rxs:
             if mode == "STRAIGHT":
                 color = GREEN if len(rxs) == 1 and rx == tx else RED
-            else:
+            elif mode == "CROSS":
                 expected_rx = CROSS_MAP.get(tx)
                 color = GREEN if len(rxs) == 1 and rx == expected_rx else RED
+            else:
+                color = RED # Faulty or unknown
+            
             width = 5
             pygame.draw.line(screen, (*color[:3], 100), left_pos[tx], right_pos[rx], width + 4)
             pygame.draw.line(screen, color, left_pos[tx], right_pos[rx], width)
 
-def draw_result_panel(status):
-    panel_width = 600
-    panel_height = 150
-    panel_x = 30
-    panel_y = HEIGHT - panel_height - 30
+def draw_result_panel(status, detected_type=None):
+    panel_width = 450
+    panel_height = 80
+    panel_x = WIDTH // 2 - 225
+    panel_y = HEIGHT - panel_height - 70
     shadow_rect = pygame.Rect(panel_x + 5, panel_y + 5, panel_width, panel_height)
     draw_rounded_rect(screen, DARK_GRAY, shadow_rect, 20)
+    
     color = GREEN if status == "PASS" else RED if status == "FAIL" else LIGHT_GRAY
     panel_rect = pygame.Rect(panel_x, panel_y, panel_width, panel_height)
     draw_rounded_rect(screen, color, panel_rect, 20)
 
     if status == "PASS":
-        check_center = (panel_x + 80, panel_y + panel_height // 2)
-        pygame.draw.circle(screen, WHITE, check_center, 45, 6)
+        check_center = (panel_x + 60, panel_y + panel_height // 2)
+        pygame.draw.circle(screen, WHITE, check_center, 35, 5)
         points = [
-            (check_center[0] - 15, check_center[1]),
-            (check_center[0] - 5, check_center[1] + 15),
-            (check_center[0] + 20, check_center[1] - 15)
+            (check_center[0] - 12, check_center[1]),
+            (check_center[0] - 4, check_center[1] + 12),
+            (check_center[0] + 16, check_center[1] - 12)
         ]
-        pygame.draw.lines(screen, WHITE, False, points, 8)
-        result_txt = BIG.render("CONNECTION OK", True, WHITE)
-    elif status == "FAIL":
-        x_center = (panel_x + 80, panel_y + panel_height // 2)
-        pygame.draw.circle(screen, WHITE, x_center, 45, 6)
-        pygame.draw.line(screen, WHITE, (x_center[0] - 15, x_center[1] - 15),
-                         (x_center[0] + 15, x_center[1] + 15), 8)
-        pygame.draw.line(screen, WHITE, (x_center[0] + 15, x_center[1] - 15),
-                         (x_center[0] - 15, x_center[1] + 15), 8)
-        result_txt = BIG.render("CABLE FAULT", True, WHITE)
-    else:
-        result_txt = TITLE_FONT.render("Ready to Test", True, DARK_GRAY)
+        pygame.draw.lines(screen, WHITE, False, points, 6)
+        msg = f"OK: {detected_type} CABLE"
+        result_txt = FONT.render(msg, True, WHITE)
 
-    txt_rect = result_txt.get_rect(center=(panel_x + panel_width // 2 + 60, panel_y + panel_height // 2))
+    elif status == "FAIL":
+        x_center = (panel_x + 60, panel_y + panel_height // 2)
+        pygame.draw.circle(screen, WHITE, x_center, 35, 5)
+        pygame.draw.line(screen, WHITE, (x_center[0] - 12, x_center[1] - 12),
+                         (x_center[0] + 12, x_center[1] + 12), 6)
+        pygame.draw.line(screen, WHITE, (x_center[0] + 12, x_center[1] - 12),
+                         (x_center[0] - 12, x_center[1] + 12), 6)
+        result_txt = FONT.render("CABLE FAULT / UNKNOWN", True, WHITE)
+    else:
+        result_txt = FONT.render("Ready to Test", True, DARK_GRAY)
+
+    txt_rect = result_txt.get_rect(center=(panel_x + panel_width // 2 + 40, panel_y + panel_height // 2))
     screen.blit(result_txt, txt_rect)
 
 # -----------------------------
@@ -200,7 +205,8 @@ def draw_result_panel(status):
 # -----------------------------
 setup_gpio()
 connections = {}
-test_mode = "STRAIGHT"
+detected_mode = "UNKNOWN"
+status = "READY"
 last_button_state = GPIO.HIGH
 button_pressed = False
 
@@ -213,13 +219,9 @@ while True:
         button_pressed = True
     last_button_state = current_button_state
 
-    # Read switch
-    switch_state = GPIO.input(SWITCH_PIN)
-    test_mode = "STRAIGHT" if switch_state == GPIO.LOW else "CROSS"
-
     # Event handling
     mouse_pos = pygame.mouse.get_pos()
-    test_btn_rect = pygame.Rect(WIDTH // 2 - 100, HEIGHT - 120, 200, 60)
+    test_btn_rect = pygame.Rect(100, HEIGHT - 120, 200, 60)
     exit_btn_rect = pygame.Rect(WIDTH - 180, HEIGHT - 80, 150, 50)
 
     for event in pygame.event.get():
@@ -240,30 +242,44 @@ while True:
     if button_pressed:
         connections = scan_connections()
         button_pressed = False
+        
+        # Auto-detect logic
+        is_straight = all(len(v) == 1 and v[0] == k for k, v in connections.items())
+        is_cross = all(len(v) == 1 and v[0] == CROSS_MAP[k] for k, v in connections.items())
+        
+        if is_straight:
+            detected_mode = "STRAIGHT"
+            status = "PASS"
+        elif is_cross:
+            detected_mode = "CROSS"
+            status = "PASS"
+        else:
+            detected_mode = "FAULT"
+            status = "FAIL"
 
     # Draw UI
-    title = TITLE_FONT.render("CABLE TESTER PRO", True, BLACK)
+    title = TITLE_FONT.render("CABLE TESTER PRO (AUTO-DETECT)", True, BLACK)
     screen.blit(title, (WIDTH // 2 - title.get_width() // 2, 20))
-    mode_color = BLUE if test_mode == "STRAIGHT" else ORANGE
-    draw_status_badge(30, 30, f"MODE: {test_mode}", mode_color)
+    
+    # Display current detected mode badge
+    if status != "READY":
+        mode_color = BLUE if detected_mode == "STRAIGHT" else ORANGE if detected_mode == "CROSS" else RED
+        draw_status_badge(30, 30, f"DETECTED: {detected_mode}", mode_color)
+    else:
+        draw_status_badge(30, 30, "MODE: AUTO-DETECT", DARK_GRAY)
 
     left_positions = draw_pins(LEFT_X, "TX (Side A)")
     right_positions = draw_pins(RIGHT_X, "RX (Side B)")
 
     if connections:
-        draw_connections(left_positions, right_positions, connections, test_mode)
-        # Determine status
-        if test_mode == "STRAIGHT":
-            status = "PASS" if all(len(v) == 1 and v[0] == k for k, v in connections.items()) else "FAIL"
-        else:
-            status = "PASS" if all(len(v) == 1 and v[0] == CROSS_MAP[k] for k, v in connections.items()) else "FAIL"
-        draw_result_panel(status)
+        draw_connections(left_positions, right_positions, connections, detected_mode)
+        draw_result_panel(status, detected_mode)
     else:
         draw_result_panel("READY")
 
     # Draw buttons
     test_hover = test_btn_rect.collidepoint(mouse_pos)
-    draw_button(WIDTH // 2 - 100, HEIGHT - 120, 200, 60, "TEST CABLE", ACCENT, test_hover)
+    draw_button(100, HEIGHT - 120, 200, 60, "TEST CABLE", ACCENT, test_hover)
     exit_hover = exit_btn_rect.collidepoint(mouse_pos)
     draw_button(WIDTH - 180, HEIGHT - 80, 150, 50, "EXIT", RED, exit_hover)
 
