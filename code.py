@@ -9,8 +9,7 @@ import sys
 TX_PINS = [17, 18, 27, 22, 23, 24, 25, 5]
 RX_PINS = [6, 12, 13, 16, 19, 20, 21, 26]
 
-BUTTON_PIN = 7  # Start test button
-# SWITCH_PIN = 8  # Removed: No longer needed for manual mode selection
+BUTTON_PIN = 7 
 
 CROSS_MAP = {
     0: 2,
@@ -29,8 +28,14 @@ CROSS_MAP = {
 GPIO.setmode(GPIO.BCM)
 GPIO.setwarnings(False)
 
+BUZZER_PIN = 18
+
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(BUZZER_PIN, GPIO.OUT)
+
+buzzer = GPIO.PWM(BUZZER_PIN, 1000) 
+
 def setup_gpio():
-    # TX pins idle HIGH
     for pin in TX_PINS:
         GPIO.setup(pin, GPIO.OUT)
         GPIO.output(pin, GPIO.HIGH)
@@ -185,6 +190,7 @@ def draw_result_panel(status, detected_type=None):
         pygame.draw.lines(screen, WHITE, False, points, 6)
         msg = f"OK: {detected_type} CABLE"
         result_txt = FONT.render(msg, True, WHITE)
+        success_sound()
 
     elif status == "FAIL":
         x_center = (panel_x + 60, panel_y + panel_height // 2)
@@ -194,11 +200,39 @@ def draw_result_panel(status, detected_type=None):
         pygame.draw.line(screen, WHITE, (x_center[0] + 12, x_center[1] - 12),
                          (x_center[0] - 12, x_center[1] + 12), 6)
         result_txt = FONT.render("CABLE FAULT / UNKNOWN", True, WHITE)
+        failure_sound()
     else:
         result_txt = FONT.render("Ready to Test", True, DARK_GRAY)
 
     txt_rect = result_txt.get_rect(center=(panel_x + panel_width // 2 + 40, panel_y + panel_height // 2))
     screen.blit(result_txt, txt_rect)
+
+def success_sound():
+    """Fast beeps for 1 second"""
+    buzzer.start(50)  # 50% duty cycle
+    start_time = time.time()
+
+    while time.time() - start_time < 1:
+        buzzer.ChangeFrequency(2000)  # higher pitch
+        time.sleep(0.1)
+        buzzer.ChangeFrequency(1500)
+        time.sleep(0.1)
+
+    buzzer.stop()
+
+
+def failure_sound():
+    """Slow beeps for 2 seconds"""
+    buzzer.start(50)
+    start_time = time.time()
+
+    while time.time() - start_time < 2:
+        buzzer.ChangeFrequency(400)  # low pitch
+        time.sleep(0.4)
+        buzzer.ChangeFrequency(200)
+        time.sleep(0.4)
+
+    buzzer.stop()
 
 # -----------------------------
 # MAIN LOOP
