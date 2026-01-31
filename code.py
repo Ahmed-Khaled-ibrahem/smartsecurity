@@ -28,7 +28,7 @@ CROSS_MAP = {
 GPIO.setmode(GPIO.BCM)
 GPIO.setwarnings(False)
 
-BUZZER_PIN = 18
+BUZZER_PIN = 4
 
 GPIO.setmode(GPIO.BCM)
 GPIO.setup(BUZZER_PIN, GPIO.OUT)
@@ -190,7 +190,6 @@ def draw_result_panel(status, detected_type=None):
         pygame.draw.lines(screen, WHITE, False, points, 6)
         msg = f"OK: {detected_type} CABLE"
         result_txt = FONT.render(msg, True, WHITE)
-        success_sound()
 
     elif status == "FAIL":
         x_center = (panel_x + 60, panel_y + panel_height // 2)
@@ -200,7 +199,6 @@ def draw_result_panel(status, detected_type=None):
         pygame.draw.line(screen, WHITE, (x_center[0] + 12, x_center[1] - 12),
                          (x_center[0] - 12, x_center[1] + 12), 6)
         result_txt = FONT.render("CABLE FAULT / UNKNOWN", True, WHITE)
-        failure_sound()
     else:
         result_txt = FONT.render("Ready to Test", True, DARK_GRAY)
 
@@ -284,12 +282,15 @@ while True:
         if is_straight:
             detected_mode = "STRAIGHT"
             status = "PASS"
+            success_sound()
         elif is_cross:
             detected_mode = "CROSS"
             status = "PASS"
+            success_sound()
         else:
             detected_mode = "FAULT"
             status = "FAIL"
+            failure_sound()
 
     # Draw UI
     title = TITLE_FONT.render("CABLE TESTER PRO (AUTO-DETECT)", True, BLACK)
