@@ -1,321 +1,622 @@
-import RPi.GPIO as GPIO
-import time
-import pygame
-import sys
+#include <WiFi.h>
+#include <Firebase_ESP_Client.h>
+#include <addons/TokenHelper.h>
+#include <addons/RTDBHelper.h>
+#include <DHT.h>
+#include <HX711.h>
+#include <time.h>
+#include <UniversalTelegramBot.h>
+#include <WiFiClientSecure.h>
+#include <ArduinoJson.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
 
-# -----------------------------
-# GPIO PINS
-# -----------------------------
-TX_PINS = [17, 18, 27, 22, 23, 24, 25, 5]
-RX_PINS = [6, 12, 13, 16, 19, 20, 21, 26]
+#define LCD_ADDRESS 0x27
+#define LCD_COLS 16
+#define LCD_ROWS 2
 
-BUTTON_PIN = 7 
+LiquidCrystal_I2C lcd(LCD_ADDRESS, LCD_COLS, LCD_ROWS);
 
-CROSS_MAP = {
-    0: 2,
-    1: 5,
-    2: 0,
-    3: 3,
-    4: 4,
-    5: 1,
-    6: 6,
-    7: 7
+bool isTesting = false;
+// https://api.telegram.org/bot8268822841:AAFIb7dUXPMNk3soX9d0TmtVxMzk6S-2RH4/getUpdates
+// ─── WiFi ────────────────────────────────────────────────────
+#define WIFI_SSID "Orange-Fast"
+#define WIFI_PASSWORD "#1288534459&4274321#Aa"
+
+// ─── Firebase ────────────────────────────────────────────────
+#define FIREBASE_API_KEY "AIzaSyCWLzqZlfJQJF0rc6n5_AjPKILrdEx1lYY"
+#define FIREBASE_DATABASE_URL "https://doma-446607-default-rtdb.firebaseio.com"
+#define FIREBASE_USER_EMAIL "esp32@gmail.com"
+#define FIREBASE_USER_PASSWORD "12345678"
+
+// ─── DHT ─────────────────────────────────────────────────────
+#define DHT_PIN 4
+#define DHT_TYPE DHT22  // change to DHT11 if needed
+// ─── HX711 ───────────────────────────────────────────────────
+#define HX711_DOUT 16
+#define HX711_SCK 17
+// ─── NTP ─────────────────────────────────────────────────────
+#define NTP_SERVER "pool.ntp.org"
+#define UTC_OFFSET 10800  // UTC+2 in seconds
+// ─── Timing ──────────────────────────────────────────────────
+#define DHT_INTERVAL_MS 8000
+#define WEIGHT_INTERVAL_MS 500
+#define DEBOUNCE_DELAY_MS 2000
+
+// ─── Telegram ────────────────────────────────────────────────
+#define TELEGRAM_RATE_LIMIT_MS 3000
+
+// ─── Firebase objects ────────────────────────────────────────
+FirebaseData fbdo;
+FirebaseAuth auth;
+FirebaseConfig config;
+
+// ─── Sensor objects ──────────────────────────────────────────
+DHT dht(DHT_PIN, DHT_TYPE);
+HX711 scale;
+
+// ─── ESP identity ────────────────────────────────────────────
+String espId;  // derived from MAC address
+
+// ─── Shelf config (loaded from Firebase) ─────────────────────
+struct ShelfConfig {
+  String name;
+  String type;     // "solid" or "liquid"
+  float itemSize;  // weight per item (g) or volume per item (ml)
+  float price;
+  int alertLimit;
+  String telegramChatId;
+  String telegramBotToken;
+  float calibrationFactor;
+  float shelfWeight;  // tare weight of empty shelf
+};
+
+// ─── History bounds (loaded from Firebase) ───────────────────
+struct HistoryBounds {
+  float maxTemp;
+  float minTemp;
+  float maxHumidity;
+  float minHumidity;
+};
+
+WiFiClientSecure client;
+ShelfConfig cfg;
+HistoryBounds history;
+
+// ─── Runtime state ───────────────────────────────────────────
+int currentItemCount = 0;
+int pendingItemCount = 0;
+float currentLoad = 0.0f;
+bool configLoaded = false;
+bool firebaseReady = false;
+
+unsigned long lastDhtUpdate = 0;
+unsigned long lastWeightRead = 0;
+unsigned long weightChangeTime = 0;  // when weight first changed
+unsigned long lastTelegramSent = 0;
+bool weightChangePending = false;
+bool isFirstTime = true;
+
+// ============================================================
+//  UTILITY — ESP ID from MAC
+// ============================================================
+
+String getEspId() {
+  uint8_t mac[6];
+  esp_read_mac(mac, ESP_MAC_WIFI_STA);  // read WiFi MAC
+  char buf[18];                         // 6 bytes × 2 hex + 1 null terminator = 13, but 18 is safe
+  snprintf(buf, sizeof(buf), "ESP_%02X%02X%02X%02X%02X%02X",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  return String(buf);
 }
 
-# -----------------------------
-# GPIO SETUP
-# -----------------------------
-GPIO.setmode(GPIO.BCM)
-GPIO.setwarnings(False)
+// ============================================================
+//  UTILITY — NTP timestamp string  "YYYY-MM-DD HH:MM:SS"
+// ============================================================
+String getTimestamp() {
+  struct tm ti;
+  if (!getLocalTime(&ti)) {
+    Serial.println("[NTP] Failed to get time");
+    return "unknown";
+  }
+  char buf[25];
+  strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &ti);
+  return String(buf);
+}
 
-BUZZER_PIN = 4
+// ============================================================
+//  WIFI — connect / reconnect
+// ============================================================
+void connectWiFi() {
+  if (WiFi.status() == WL_CONNECTED) return;
 
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(BUZZER_PIN, GPIO.OUT)
+  Serial.printf("[WiFi] Connecting to %s", WIFI_SSID);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  lcdPrint("Connecting ...", WIFI_SSID);
 
-buzzer = GPIO.PWM(BUZZER_PIN, 1000) 
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 40) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
 
-def setup_gpio():
-    for pin in TX_PINS:
-        GPIO.setup(pin, GPIO.OUT)
-        GPIO.output(pin, GPIO.HIGH)
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf("\n[WiFi] Connected — IP: %s\n", WiFi.localIP().toString().c_str());
+  } else {
+    Serial.println("\n[WiFi] Connection failed — will retry later");
+    lcdPrint("not connected", WIFI_SSID);
+  }
+}
 
-    # RX pins with PULL-UP
-    for pin in RX_PINS:
-        GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+// ============================================================
+//  FIREBASE — initialise
+// ============================================================
+void initFirebase() {
+  config.api_key = FIREBASE_API_KEY;
+  config.database_url = FIREBASE_DATABASE_URL;
+  auth.user.email = FIREBASE_USER_EMAIL;
+  auth.user.password = FIREBASE_USER_PASSWORD;
+  config.token_status_callback = tokenStatusCallback;
 
-    # Button
-    GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+  Firebase.begin(&config, &auth);
+  Firebase.reconnectWiFi(true);
 
-def cleanup():
-    GPIO.cleanup()
+  Serial.println("[Firebase] Initialised — waiting for auth token...");
 
-# -----------------------------
-# CABLE SCAN FUNCTION
-# -----------------------------
-def scan_connections(delay=0.01):
-    """
-    Returns mapping:
-    { tx_index: [rx_index, ...] }
-    """
-    mapping = {}
+  // Wait up to 10 s for token
+  unsigned long start = millis();
+  while (!Firebase.ready() && millis() - start < 10000) {
+    delay(200);
+    Serial.print(".");
+  }
+  Serial.println();
 
-    # Ensure idle
-    for pin in TX_PINS:
-        GPIO.output(pin, GPIO.HIGH)
+  if (Firebase.ready()) {
+    firebaseReady = true;
+    Serial.println("[Firebase] Auth token OK");
+  } else {
+    Serial.println("[Firebase] Auth failed — check credentials");
+  }
+}
 
-    for tx_index, tx_pin in enumerate(TX_PINS):
-        GPIO.output(tx_pin, GPIO.LOW)  # drive active
-        time.sleep(delay)
+// ============================================================
+//  FIREBASE — load config from  /<espId>/config
+// ============================================================
+bool loadConfig() {
+  Serial.println("[Config] Loading shelf configuration from Firebase...");
 
-        connected = []
-        for rx_index, rx_pin in enumerate(RX_PINS):
-            if GPIO.input(rx_pin) == GPIO.LOW:  # active connection
-                connected.append(rx_index)
+  String basePath = "/" + espId + "/config";
 
-        mapping[tx_index] = connected
-        GPIO.output(tx_pin, GPIO.HIGH)  # reset to idle
+  // Helper lambda to read a string field
+  auto readStr = [&](const char* key, String& dest) -> bool {
+    if (Firebase.RTDB.getString(&fbdo, basePath + "/" + key)) {
+      dest = fbdo.stringData();
+      Serial.printf("[Config]   %s = %s\n", key, dest.c_str());
+      return true;
+    }
+    Serial.printf("[Config]   ERROR reading %s: %s\n", key, fbdo.errorReason().c_str());
+    return false;
+  };
 
-    return mapping
+  auto readFloat = [&](const char* key, float& dest) -> bool {
+    if (Firebase.RTDB.getFloat(&fbdo, basePath + "/" + key)) {
+      dest = fbdo.floatData();
+      Serial.printf("[Config]   %s = %.4f\n", key, dest);
+      return true;
+    }
+    Serial.printf("[Config]   ERROR reading %s: %s\n", key, fbdo.errorReason().c_str());
+    return false;
+  };
 
-# -----------------------------
-# PYGAME UI SETUP
-# -----------------------------
-pygame.init()
-screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
-WIDTH, HEIGHT = screen.get_size()
+  auto readInt = [&](const char* key, int& dest) -> bool {
+    if (Firebase.RTDB.getInt(&fbdo, basePath + "/" + key)) {
+      dest = fbdo.intData();
+      Serial.printf("[Config]   %s = %d\n", key, dest);
+      return true;
+    }
+    Serial.printf("[Config]   ERROR reading %s: %s\n", key, fbdo.errorReason().c_str());
+    return false;
+  };
 
-FONT = pygame.font.SysFont("arial", 24)
-FONT_SMALL = pygame.font.SysFont("arial", 20)
-BIG = pygame.font.SysFont("arial", 56, bold=True)
-TITLE_FONT = pygame.font.SysFont("arial", 36, bold=True)
+  bool ok = true;
+  ok &= readStr("name", cfg.name);
+  ok &= readStr("type", cfg.type);
+  ok &= readFloat("item_size", cfg.itemSize);
+  ok &= readFloat("price", cfg.price);
+  ok &= readInt("alert_limit", cfg.alertLimit);
+  ok &= readStr("telegram_chat_id", cfg.telegramChatId);
+  ok &= readStr("telegram_bot_token", cfg.telegramBotToken);
+  ok &= readFloat("calibration_factor", cfg.calibrationFactor);
+  ok &= readFloat("shelf_weight", cfg.shelfWeight);
 
-WHITE = (255, 255, 255)
-BLACK = (30, 30, 30)
-DARK_GRAY = (60, 60, 60)
-LIGHT_GRAY = (220, 220, 220)
-BLUE = (41, 128, 185)
-GREEN = (39, 174, 96)
-RED = (231, 76, 60)
-ORANGE = (243, 156, 18)
-ACCENT = (52, 152, 219)
+  if (!ok) {
+    Serial.println("[Config] One or more fields failed to load");
+    return false;
+  }
+  Serial.println("[Config] Configuration loaded successfully");
+  return true;
+}
 
-LEFT_X = 250
-RIGHT_X = WIDTH - 250
-TOP_Y = 200
-SPACING = 50
+// ============================================================
+//  FIREBASE — load history bounds from  /<espId>/history
+// ============================================================
+bool loadHistoryBounds() {
+  Serial.println("[History] Loading history bounds from Firebase...");
 
-# -----------------------------
-# DRAWING HELPERS
-# -----------------------------
-def draw_rounded_rect(surface, color, rect, radius=15):
-    pygame.draw.rect(surface, color, rect, border_radius=radius)
+  String basePath = "/" + espId + "/history";
 
-def draw_button(x, y, width, height, text, color, hover=False):
-    button_rect = pygame.Rect(x, y, width, height)
-    shadow_rect = pygame.Rect(x + 3, y + 3, width, height)
-    draw_rounded_rect(screen, DARK_GRAY, shadow_rect, 12)
-    btn_color = tuple(min(c + 20, 255) for c in color) if hover else color
-    draw_rounded_rect(screen, btn_color, button_rect, 12)
-    txt = FONT.render(text, True, WHITE)
-    txt_rect = txt.get_rect(center=button_rect.center)
-    screen.blit(txt, txt_rect)
-    return button_rect
+  auto readFloat = [&](const char* key, float& dest) -> bool {
+    if (Firebase.RTDB.getFloat(&fbdo, basePath + "/" + key)) {
+      dest = fbdo.floatData();
+      Serial.printf("[History]   %s = %.2f\n", key, dest);
+      return true;
+    }
+    Serial.printf("[History]   ERROR reading %s: %s\n", key, fbdo.errorReason().c_str());
+    return false;
+  };
 
-def draw_status_badge(x, y, text, color):
-    padding = 20
-    txt = FONT_SMALL.render(text, True, WHITE)
-    badge_width = txt.get_width() + padding * 2
-    badge_height = 35
-    badge_rect = pygame.Rect(x, y, badge_width, badge_height)
-    draw_rounded_rect(screen, color, badge_rect, 17)
-    txt_rect = txt.get_rect(center=badge_rect.center)
-    screen.blit(txt, txt_rect)
-    return badge_width
+  bool ok = true;
+  ok &= readFloat("max_temp", history.maxTemp);
+  ok &= readFloat("min_temp", history.minTemp);
+  ok &= readFloat("max_humidity", history.maxHumidity);
+  ok &= readFloat("min_humidity", history.minHumidity);
 
-def draw_pins(x, label):
-    label_txt = TITLE_FONT.render(label, True, BLACK)
-    label_rect = label_txt.get_rect(center=(x, TOP_Y - 80))
-    screen.blit(label_txt, label_rect)
+  if (!ok) {
+    Serial.println("[History] Warning: Some history bounds could not be loaded — using defaults");
+    // Non-fatal: default to extreme values so any reading updates them
+    history.maxTemp = -999;
+    history.minTemp = 999;
+    history.maxHumidity = -999;
+    history.minHumidity = 999;
+  }
+  return true;
+}
 
-    positions = []
-    for i in range(8):
-        y = TOP_Y + i * SPACING
-        pygame.draw.circle(screen, DARK_GRAY, (x + 2, y + 2), 18)  # shadow
-        pygame.draw.circle(screen, ACCENT, (x, y), 18)
-        pygame.draw.circle(screen, WHITE, (x, y), 15)
-        pygame.draw.circle(screen, ACCENT, (x, y), 8)
-        num_txt = FONT.render(str(i + 1), True, BLACK)
-        num_bg_rect = pygame.Rect(x - 60, y - 15, 40, 30)
-        draw_rounded_rect(screen, LIGHT_GRAY, num_bg_rect, 8)
-        screen.blit(num_txt, (x - 50, y - 12))
-        positions.append((x, y))
-    return positions
+// ============================================================
+//  DHT — read and push to Firebase
+// ============================================================
+void updateDHTReading() {
+  float temp = 0;
+  float hum = 0;
 
-def draw_connections(left_pos, right_pos, mapping, mode):
-    for tx, rxs in mapping.items():
-        for rx in rxs:
-            if mode == "STRAIGHT":
-                color = GREEN if len(rxs) == 1 and rx == tx else RED
-            elif mode == "CROSS":
-                expected_rx = CROSS_MAP.get(tx)
-                color = GREEN if len(rxs) == 1 and rx == expected_rx else RED
-            else:
-                color = RED # Faulty or unknown
-            
-            width = 5
-            pygame.draw.line(screen, (*color[:3], 100), left_pos[tx], right_pos[rx], width + 4)
-            pygame.draw.line(screen, color, left_pos[tx], right_pos[rx], width)
+  if (isTesting) {
+    float number = random(0, 100);
+    temp = number;
+    hum = number + 10;
+  } else {
+    temp = dht.readTemperature();
+    hum = dht.readHumidity();
 
-def draw_result_panel(status, detected_type=None):
-    panel_width = 450
-    panel_height = 80
-    panel_x = WIDTH // 2 - 225
-    panel_y = HEIGHT - panel_height - 70
-    shadow_rect = pygame.Rect(panel_x + 5, panel_y + 5, panel_width, panel_height)
-    draw_rounded_rect(screen, DARK_GRAY, shadow_rect, 20)
-    
-    color = GREEN if status == "PASS" else RED if status == "FAIL" else LIGHT_GRAY
-    panel_rect = pygame.Rect(panel_x, panel_y, panel_width, panel_height)
-    draw_rounded_rect(screen, color, panel_rect, 20)
+    if (isnan(temp) || isnan(hum)) {
+      Serial.println("[DHT] Read failed — sensor might be disconnected");
+      return;
+    }
+  }
 
-    if status == "PASS":
-        check_center = (panel_x + 60, panel_y + panel_height // 2)
-        pygame.draw.circle(screen, WHITE, check_center, 35, 5)
-        points = [
-            (check_center[0] - 12, check_center[1]),
-            (check_center[0] - 4, check_center[1] + 12),
-            (check_center[0] + 16, check_center[1] - 12)
-        ]
-        pygame.draw.lines(screen, WHITE, False, points, 6)
-        msg = f"OK: {detected_type} CABLE"
-        result_txt = FONT.render(msg, True, WHITE)
+  Serial.printf("[DHT] Temp: %.1f°C  Humidity: %.1f%%\n", temp, hum);
 
-    elif status == "FAIL":
-        x_center = (panel_x + 60, panel_y + panel_height // 2)
-        pygame.draw.circle(screen, WHITE, x_center, 35, 5)
-        pygame.draw.line(screen, WHITE, (x_center[0] - 12, x_center[1] - 12),
-                         (x_center[0] + 12, x_center[1] + 12), 6)
-        pygame.draw.line(screen, WHITE, (x_center[0] + 12, x_center[1] - 12),
-                         (x_center[0] - 12, x_center[1] + 12), 6)
-        result_txt = FONT.render("CABLE FAULT / UNKNOWN", True, WHITE)
-    else:
-        result_txt = FONT.render("Ready to Test", True, DARK_GRAY)
+  // Update history bounds
+  bool historyChanged = false;
+  if (temp > history.maxTemp) {
+    history.maxTemp = temp;
+    historyChanged = true;
+  }
+  if (temp < history.minTemp) {
+    history.minTemp = temp;
+    historyChanged = true;
+  }
+  if (hum > history.maxHumidity) {
+    history.maxHumidity = hum;
+    historyChanged = true;
+  }
+  if (hum < history.minHumidity) {
+    history.minHumidity = hum;
+    historyChanged = true;
+  }
 
-    txt_rect = result_txt.get_rect(center=(panel_x + panel_width // 2 + 40, panel_y + panel_height // 2))
-    screen.blit(result_txt, txt_rect)
+  String basePath = "/" + espId + "/readings";
+  String histPath = "/" + espId + "/history";
+  String timestamp = getTimestamp();
 
-def success_sound():
-    """Fast beeps for 1 second"""
-    buzzer.start(50)  # 50% duty cycle
-    start_time = time.time()
+  // Push current readings
+  Firebase.RTDB.setFloat(&fbdo, basePath + "/temperature", temp) || Serial.printf("[DHT] Firebase write temp failed: %s\n", fbdo.errorReason().c_str());
+  Firebase.RTDB.setFloat(&fbdo, basePath + "/humidity", hum) || Serial.printf("[DHT] Firebase write hum failed: %s\n", fbdo.errorReason().c_str());
+  Firebase.RTDB.setString(&fbdo, basePath + "/last_update", timestamp) || Serial.printf("[DHT] Firebase write time failed: %s\n", fbdo.errorReason().c_str());
 
-    while time.time() - start_time < 1:
-        buzzer.ChangeFrequency(2000)  # higher pitch
-        time.sleep(0.1)
-        buzzer.ChangeFrequency(1500)
-        time.sleep(0.1)
+  // Push updated history bounds if changed
+  if (historyChanged) {
+    Firebase.RTDB.setFloat(&fbdo, histPath + "/max_temp", history.maxTemp);
+    Firebase.RTDB.setFloat(&fbdo, histPath + "/min_temp", history.minTemp);
+    Firebase.RTDB.setFloat(&fbdo, histPath + "/max_humidity", history.maxHumidity);
+    Firebase.RTDB.setFloat(&fbdo, histPath + "/min_humidity", history.minHumidity);
+    Serial.println("[DHT] History bounds updated on Firebase");
+  }
+}
 
-    buzzer.stop()
+// ============================================================
+//  HX711 — read net load and convert to item count
+// ============================================================
+float readNetLoad() {
+  if (!scale.is_ready()) {
+    Serial.println("[HX711] Scale not ready");
+    return currentLoad;
+  }
 
+  float raw = scale.get_units(5);     // average 5 readings
+  float net = raw - cfg.shelfWeight;  // subtract empty shelf tare
+  if (net < 0) net = 0;
 
-def failure_sound():
-    """Slow beeps for 2 seconds"""
-    buzzer.start(50)
-    start_time = time.time()
+  Serial.printf("[HX711] Raw: %.2fg  Net: %.2fg\n", raw, net);
+  return net;
+}
 
-    while time.time() - start_time < 2:
-        buzzer.ChangeFrequency(400)  # low pitch
-        time.sleep(0.4)
-        buzzer.ChangeFrequency(200)
-        time.sleep(0.4)
+int loadToItemCount(float netLoad) {
+  if (cfg.itemSize <= 0) {
+    Serial.println("[Items] item_size is 0 — cannot calculate count");
+    return 0;
+  }
+  return (int)round(netLoad / cfg.itemSize);
+}
 
-    buzzer.stop()
+// ============================================================
+//  FIREBASE — push item count update
+// ============================================================
+void pushItemCountToFirebase(int count, float load) {
+  String basePath = "/" + espId + "/readings";
 
-# -----------------------------
-# MAIN LOOP
-# -----------------------------
-setup_gpio()
-connections = {}
-detected_mode = "UNKNOWN"
-status = "READY"
-last_button_state = GPIO.HIGH
-button_pressed = False
+  Serial.printf("[Firebase] Pushing item count: %d  load: %.2fg\n", count, load);
 
-while True:
-    screen.fill(WHITE)
+  Firebase.RTDB.setInt(&fbdo, basePath + "/item_count", count) || Serial.printf("[Items] Write count failed: %s\n", fbdo.errorReason().c_str());
+  Firebase.RTDB.setFloat(&fbdo, basePath + "/current_load", load) || Serial.printf("[Items] Write load failed: %s\n", fbdo.errorReason().c_str());
+}
 
-    # Read button
-    current_button_state = GPIO.input(BUTTON_PIN)
-    if current_button_state == GPIO.LOW and last_button_state == GPIO.HIGH:
-        button_pressed = True
-    last_button_state = current_button_state
+// ============================================================
+//  FIREBASE — log transaction to /transactions
+// ============================================================
+void logTransaction(int delta) {
+  String type = (delta > 0) ? "plus" : "minus";
+  int amount = abs(delta);
 
-    # Event handling
-    mouse_pos = pygame.mouse.get_pos()
-    test_btn_rect = pygame.Rect(100, HEIGHT - 120, 200, 60)
-    exit_btn_rect = pygame.Rect(WIDTH - 180, HEIGHT - 80, 150, 50)
+  Serial.printf("[Transaction] %s %d × %s\n", type.c_str(), amount, cfg.name.c_str());
 
-    for event in pygame.event.get():
-        if event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_ESCAPE:
-                cleanup()
-                pygame.quit()
-                sys.exit()
-        elif event.type == pygame.MOUSEBUTTONDOWN:
-            if test_btn_rect.collidepoint(mouse_pos):
-                button_pressed = True
-            elif exit_btn_rect.collidepoint(mouse_pos):
-                cleanup()
-                pygame.quit()
-                sys.exit()
+  String txPath = "/transactions";
 
-    # Perform test
-    if button_pressed:
-        connections = scan_connections()
-        button_pressed = False
-        
-        # Auto-detect logic
-        is_straight = all(len(v) == 1 and v[0] == k for k, v in connections.items())
-        is_cross = all(len(v) == 1 and v[0] == CROSS_MAP[k] for k, v in connections.items())
-        
-        if is_straight:
-            detected_mode = "STRAIGHT"
-            status = "PASS"
-            success_sound()
-        elif is_cross:
-            detected_mode = "CROSS"
-            status = "PASS"
-            success_sound()
-        else:
-            detected_mode = "FAULT"
-            status = "FAIL"
-            failure_sound()
+  FirebaseJson json;
+  json.set("esp_id", espId);
+  json.set("name", cfg.name);
+  json.set("date", getTimestamp());
+  json.set("type", type);
+  json.set("amount", amount);
 
-    # Draw UI
-    title = TITLE_FONT.render("CABLE TESTER PRO (AUTO-DETECT)", True, BLACK)
-    screen.blit(title, (WIDTH // 2 - title.get_width() // 2, 20))
-    
-    # Display current detected mode badge
-    if status != "READY":
-        mode_color = BLUE if detected_mode == "STRAIGHT" else ORANGE if detected_mode == "CROSS" else RED
-        draw_status_badge(30, 30, f"DETECTED: {detected_mode}", mode_color)
-    else:
-        draw_status_badge(30, 30, "MODE: AUTO-DETECT", DARK_GRAY)
+  if (Firebase.RTDB.pushJSON(&fbdo, txPath, &json)) {
+    Serial.printf("[Transaction] Logged with key: %s\n", fbdo.pushName().c_str());
+  } else {
+    Serial.printf("[Transaction] Failed: %s\n", fbdo.errorReason().c_str());
+  }
+}
 
-    left_positions = draw_pins(LEFT_X, "TX (Side A)")
-    right_positions = draw_pins(RIGHT_X, "RX (Side B)")
+// ============================================================
+//  TELEGRAM — send alert message
+// ============================================================
+void sendTelegramAlert(int count) {
 
-    if connections:
-        draw_connections(left_positions, right_positions, connections, detected_mode)
-        draw_result_panel(status, detected_mode)
-    else:
-        draw_result_panel("READY")
+  static UniversalTelegramBot bot(cfg.telegramBotToken, client);
+  // Rate limiting
+  unsigned long now = millis();
+  if (now - lastTelegramSent < TELEGRAM_RATE_LIMIT_MS) {
+    Serial.println("[Telegram] Rate limited — skipping alert");
+    return;
+  }
 
-    # Draw buttons
-    test_hover = test_btn_rect.collidepoint(mouse_pos)
-    draw_button(100, HEIGHT - 120, 200, 60, "TEST CABLE", ACCENT, test_hover)
-    exit_hover = exit_btn_rect.collidepoint(mouse_pos)
-    draw_button(WIDTH - 180, HEIGHT - 80, 150, 50, "EXIT", RED, exit_hover)
+  if (cfg.telegramBotToken.isEmpty() || cfg.telegramChatId.isEmpty()) {
+    Serial.println("[Telegram] Bot token or chat ID not set — skipping");
+    return;
+  }
 
-    pygame.display.flip()
+  String msg = "⚠️ *Stock Alert* ⚠️\n";
+  msg += "Shelf: *" + cfg.name + "*\n";
+  msg += "Items remaining: *" + String(count) + "*\n";
+  msg += "Alert limit: " + String(cfg.alertLimit) + "\n";
+  msg += "Time: " + getTimestamp();
+
+  bool result = bot.sendMessage(cfg.telegramChatId, msg, "");
+
+  if (result) {
+    Serial.println("[Telegram] Alert sent successfully");
+    lastTelegramSent = now;
+  } else {
+    Serial.printf("[Telegram] Failed ");
+    Serial.println(result);
+  }
+}
+
+// ============================================================
+//  WEIGHT — main polling logic with debounce
+// ============================================================
+void handleWeightReading() {
+  float netLoad = 0;
+
+  if (isTesting) {
+    netLoad = analogRead(34);
+  } else {
+    netLoad = readNetLoad();
+  }
+
+  int newCount = loadToItemCount(netLoad);
+
+  if (isFirstTime) {
+    isFirstTime = false;
+    currentItemCount = newCount;
+  }
+
+  if (newCount == currentItemCount && !weightChangePending) {
+    return;  // nothing changed
+  }
+
+  if (newCount != pendingItemCount) {
+    // Weight is still in flux — restart debounce window
+    pendingItemCount = newCount;
+    weightChangeTime = millis();
+    weightChangePending = true;
+    Serial.printf("[Debounce] Weight changed → %d items — waiting for stable reading...\n", newCount);
+    return;
+  }
+
+  // Same pending count — check if debounce window has passed
+  if (weightChangePending && (millis() - weightChangeTime >= DEBOUNCE_DELAY_MS)) {
+    int delta = pendingItemCount - currentItemCount;
+
+    if (delta == 0) {
+      weightChangePending = false;
+      return;
+    }
+
+    Serial.printf("[Items] Stable change detected: %d → %d (delta %+d)\n",
+                  currentItemCount, pendingItemCount, delta);
+
+    currentItemCount = pendingItemCount;
+    currentLoad = netLoad;
+    weightChangePending = false;
+
+    pushItemCountToFirebase(currentItemCount, currentLoad);
+    logTransaction(delta);
+
+    if (currentItemCount <= cfg.alertLimit) {
+      Serial.printf("[Alert] Item count %d ≤ alert limit %d — sending Telegram\n",
+                    currentItemCount, cfg.alertLimit);
+      sendTelegramAlert(currentItemCount);
+    }
+  }
+}
+
+void lcdPrint(String line1, String line2) {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(line1);
+
+  lcd.setCursor(0, 1);
+  lcd.print(line2);
+}
+
+// ============================================================
+//  SETUP
+// ============================================================
+void setup() {
+  Serial.begin(115200);
+  Serial.println("\n====================================");
+  Serial.println("  Smart Shelf — Booting");
+  Serial.println("====================================");
+  lcd.init();
+  lcd.backlight();
+  lcd.clear();
+  lcdPrint("Smart Shelf", "Booting");
+  delay(200);
+
+  espId = getEspId();
+  Serial.printf("[System] ESP ID: %s\n", espId.c_str());
+
+  // WiFi
+  connectWiFi();
+  client.setInsecure();
+
+  // NTP
+  lcdPrint("Time Sync", "Loading ...");
+  configTime(UTC_OFFSET, 0, NTP_SERVER);
+  Serial.println("[NTP] Synchronising time ...");
+
+  struct tm timeinfo;
+  int attempts = 0;
+  while (!getLocalTime(&timeinfo) && attempts < 40) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+    if (attempts > 30) {
+      lcdPrint("Please Restart", "The Device");
+      Serial.println("Please Restart the device");
+    }
+  }
+  Serial.println();
+
+  if (getLocalTime(&timeinfo)) {
+    Serial.printf("[NTP] Time: %s\n", getTimestamp().c_str());
+    lcdPrint("Time : ", getTimestamp().c_str());
+  } else {
+    Serial.println("[NTP] Failed to get time — check WiFi/NTP server");
+  }
+
+  lcdPrint("Reading Database", "Loading ...");
+  // Firebase
+  initFirebase();
+
+  if (firebaseReady) {
+    String _path = "/" + espId + "/anchor";
+    Firebase.RTDB.setString(&fbdo, _path + "/anchor", "esp") || Serial.printf("[DHT] Firebase write anchor failed: %s\n", fbdo.errorReason().c_str());
+
+    loadConfig();
+    loadHistoryBounds();
+    configLoaded = true;
+  } else {
+    Serial.println("[Setup] Firebase not ready — running without config");
+  }
+  lcdPrint("Checking Sensors", "Loading ...");
+  // DHT
+  dht.begin();
+  Serial.println("[DHT] Sensor initialised");
+
+  // HX711
+  scale.begin(HX711_DOUT, HX711_SCK);
+  if (scale.is_ready()) {
+    scale.set_scale(cfg.calibrationFactor);
+    scale.tare();
+    Serial.printf("[HX711] Scale ready — calibration factor: %.2f\n", cfg.calibrationFactor);
+  } else {
+    Serial.println("[HX711] WARNING: Scale not responding — check wiring");
+  }
+
+  // Read initial item count
+  currentLoad = readNetLoad();
+  currentItemCount = loadToItemCount(currentLoad);
+  pendingItemCount = currentItemCount;
+  Serial.printf("[Items] Initial count: %d  load: %.2fg\n", currentItemCount, currentLoad);
+
+  Serial.println("[Setup] Boot complete — entering main loop");
+  Serial.println("====================================\n");
+}
+
+// ============================================================
+//  LOOP
+// ============================================================
+void loop() {
+  unsigned long now = millis();
+
+  // ── WiFi watchdog ──────────────────────────────────────────
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[WiFi] Connection lost — attempting reconnect...");
+    connectWiFi();
+    if (WiFi.status() == WL_CONNECTED && !firebaseReady) {
+      initFirebase();
+      if (firebaseReady && !configLoaded) {
+        loadConfig();
+        loadHistoryBounds();
+        configLoaded = true;
+      }
+    }
+    return;  // skip sensor reads until reconnected
+  }
+
+  // ── DHT every 3 seconds ───────────────────────────────────
+  if (configLoaded && (now - lastDhtUpdate >= DHT_INTERVAL_MS)) {
+    lastDhtUpdate = now;
+    updateDHTReading();
+    lcdPrint(cfg.name, String(cfg.price));
+  }
+
+  // ── Weight every 500 ms ───────────────────────────────────
+  if (configLoaded && (now - lastWeightRead >= WEIGHT_INTERVAL_MS)) {
+    lastWeightRead = now;
+    handleWeightReading();
+  }
+
+  delay(10);
+}
