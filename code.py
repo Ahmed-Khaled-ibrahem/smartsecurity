@@ -1,437 +1,486 @@
+#include <WebServer.h>
+#include "website.h"
 #include <WiFi.h>
-#include <Firebase_ESP_Client.h>
-#include <addons/TokenHelper.h>
-#include <addons/RTDBHelper.h>
-#include <Wire.h>
-#include <LiquidCrystal_I2C.h>
-#include <BLEDevice.h>
-#include <BLEAdvertising.h>
-#include <time.h>
+#include <Arduino.h>
+#include <ESP32Servo.h>
+#include <Preferences.h>
+#include <Adafruit_MLX90640.h>
+// Pin Definitions
+#define MQ2_PIN 34
+#define PUMP_PIN 26
+#define BUZZER_PIN 4
+#define SERVO_X_PIN 18
+#define SERVO_Y_PIN 19
+#define SERVO_DOOR_PIN 25
 
-// WiFi
-#define WIFI_SSID "Orange-Fast"
-#define WIFI_PASSWORD "#1288534459&4274321#Aa"
+// Thresholds
+#define FIRE_TEMP_THRESHOLD 50.0
+#define SMOKE_ADC_THRESHOLD 2000
 
-// Firebase RTDB
-#define FIREBASE_HOST "https://mawqifi-81e4b-default-rtdb.firebaseio.com"
-#define FIREBASE_API_KEY "AIzaSyDOWRS5hc5XN-5sTb3oBuCyiuV5jQeurjw"
+// PID Control Constants
+#define PID_KP 0.30f
+#define PID_KI 0.05f
+#define PID_KD 0.15f
 
-// Firebase Auth — email/password account for all ESP units
-#define FIREBASE_USER_EMAIL "esp@gmail.com"
-#define FIREBASE_USER_PASS "12345678"
+// Thermal Stability
+#define THERMAL_EMA_ALPHA 0.40f // Lower = smoother but slower (0.0 to 1.0)
+#define FIRE_HYSTERESIS 2.5f
 
-// Pin definitions
-#define TRIG_PIN 25
-#define ECHO_PIN 26
-#define LED_RED_PIN 5
-#define LED_GREEN_PIN 18
-#define LED_BLUE_PIN 19
-#define BUZZER_PIN 23
+// Servo Settings
+#define SERVO_DEADBAND 1
+#define SERVO_HOME_X 90
+#define SERVO_HOME_Y 90
+#define SERVO_X_MIN 0
+#define SERVO_X_MAX 180
+#define SERVO_Y_MIN 40
+#define SERVO_Y_MAX 140
 
-// LCD I2C (address is usually 0x27 or 0x3F — check your module)
-#define LCD_I2C_ADDR 0x27
-#define LCD_COLS 16
-#define LCD_ROWS 2
+#define DOOR_CLOSED 90
+#define DOOR_OPEN 0
 
-// Sensor settings
-#define CAR_DISTANCE_CM 20  // distance (cm) at or below = car present
+#define DEBUG_INTERVAL_MS 1000
 
-// ─── Firebase objects ─────────────────────────
-FirebaseData fbStream;    // dedicated object for the label stream
-FirebaseData bookStream;  // dedicated object for the label stream
-FirebaseData fbWrite;     // used only for writes
-FirebaseAuth auth;
-FirebaseConfig config;
 
-// ─── Globals ──────────────────────────────────
-LiquidCrystal_I2C lcd(LCD_I2C_ADDR, LCD_COLS, LCD_ROWS);
+const char* WIFI_SSID = "FireSystem";
+const char* WIFI_PASS = "12345678";
 
-String unitId = "";  // set at runtime from MAC address
-bool carPresent = false;
-bool lastCarPresent = false;
-String currentLabel = "...";
-String currentStatus = "";
+// Hardware Objects
+Adafruit_MLX90640 mlx;
+WebServer server(80);
+Servo servoX;
+Servo servoY;
+Servo servoDoor;
 
-time_t bookedTime;
-bool timerFinished = true;
+// Task Handles
+TaskHandle_t sensorHandle;
 
-String userId = "";
+// Control Variables
+float smoothX = SERVO_HOME_X;
+float smoothY = SERVO_HOME_Y;
+float errorTargetX = 0, errorTargetY = 0;
+float integralX = 0, integralY = 0;
+float lastErrorX = 0, lastErrorY = 0;
 
-// ─── Path helpers ─────────────────────────────
-String unitPath() {
-  return "/units/" + unitId;
-}
-String statusPath() {
-  return unitPath() + "/status";
-}
-String labelPath() {
-  return unitPath() + "/label";
-}
-String bookPath() {
-  return unitPath() + "/bookedAt";
-}
-String userIdPath() {
-  return unitPath() + "/bookedBy";
-}
+int lastWrittenX = -1;
+int lastWrittenY = -1;
+unsigned long lastDebugMs = 0;
+bool cameraOK = false;
 
-// Forward declarations
-void lcdShow(String line1, String line2);
-void updateLED(bool busy);
-void beepStatusChange();
+// Multi-frame averaging buffer (EMA)
+float emaFrame[768];
+// Shared System State
+struct SystemState {
+    float frame[768];
+    float maxTemp;
+    int maxIndex;
+    int gasValue;
+    bool fireDetected;
+    bool smokeDetected;
+    bool pumpOn;
+    bool doorOpen;
+    bool manualMode;
+    int servoX;
+    int servoY;
+    int manualTargetX;
+    int manualTargetY;
+    int customHomeX;
+    int customHomeY;
+    bool fireActive; 
+};
 
-void onLabelStream(FirebaseStream data) {
-  Serial.println("[STREAM] Event received");
-  Serial.println("[STREAM] Path  : " + data.streamPath());
-  Serial.println("[STREAM] Event : " + data.eventType());
-  Serial.println("[STREAM] Type  : " + data.dataType());
+// Define Global State
+SystemState state;
+SemaphoreHandle_t dataMutex;
+Preferences prefs;
 
-  if (data.dataTypeEnum() == fb_esp_rtdb_data_type_string) {
-    String newLabel = data.stringData();
-    Serial.println("[STREAM] New label value → " + newLabel);
 
-    if (newLabel != currentLabel) {
-      currentLabel = newLabel;
-      lcdShow(currentLabel, currentStatus + userId);
-    } else {
-      Serial.println("[STREAM] Label unchanged, skipping LCD update");
-    }
-  }
-}
-
-void onBookedStream(FirebaseStream data) {
-  Serial.println("[STREAM] Event received");
-  Serial.println("[STREAM] Path  : " + data.streamPath());
-  Serial.println("[STREAM] Event : " + data.eventType());
-  Serial.println("[STREAM] Type  : " + data.dataType());
-
-  if (data.dataTypeEnum() == fb_esp_rtdb_data_type_string) {
-    String bookedAt = data.stringData();
-    Serial.println("[STREAM] New booking value → " + bookedAt);
-    bookedTime = parseFirebaseTime(bookedAt);
-    timerFinished = false;
-    userId = " - " + readUserId(fbWrite, userIdPath());
-    lcdShow(currentLabel, "booked" + userId);
-    Serial.println("Result: " + userId);
-  }
-}
-
-// Stream timeout callback — library auto-reconnects after this
-void onStreamTimeout(bool timeout) {
-  if (timeout) {
-    Serial.println("[STREAM] Timed out — reconnecting...");
-  }
-}
-
-void ble_setup(String name) {
-  BLEDevice::init(name.c_str());
-
-  BLEAdvertising *advertising = BLEDevice::getAdvertising();
-  advertising->setScanResponse(true);
-
-  BLEDevice::startAdvertising();
-
-  Serial.println("[BLE] Advertising as: " + name);
-}
-
-void initTime() {
-  configTime(0, 0, "time.google.com", "pool.ntp.org");
-
-  Serial.print("Waiting for time");
-  time_t now = time(nullptr);
-
-  while (now < 100000) {
-    delay(500);
-    Serial.print(".");
-    now = time(nullptr);
-  }
-
-  Serial.println("\nTime initialized");
-}
-// ══════════════════════════════════════════════
-//  SETUP
-// ══════════════════════════════════════════════
 void setup() {
   Serial.begin(9600);
+  delay(1000); 
+  Serial.println(F("\n--- Localized Fire System v6.0 ---"));
 
-  unitId = WiFi.macAddress();  // format: "A4:CF:12:34:56:78"
-  Serial.println("\n[BOOT] Unit ID (MAC): " + unitId);
-  ble_setup(unitId);
-  // ── Pin modes ──
-  pinMode(TRIG_PIN, OUTPUT);
-  pinMode(ECHO_PIN, INPUT);
-  pinMode(LED_RED_PIN, OUTPUT);
-  pinMode(LED_GREEN_PIN, OUTPUT);
-  pinMode(LED_BLUE_PIN, OUTPUT);
-  pinMode(BUZZER_PIN, OUTPUT);
-  digitalWrite(LED_BLUE_PIN, LOW);  // blue stays off always
+  system_data_init();
 
-  // ── LCD init ──
-  lcd.init();
-  lcd.backlight();
-  lcdShow("Booting...", "");
+  // Hardware Setup
+  servos_setup();
+  buzzer_setup();
+  pump_setup();
+  gas_sensor_setup();
+  
+  smoothX = state.customHomeX;
+  smoothY = state.customHomeY;
 
-  // ── WiFi ──
-  connectWiFi();
-  initTime();
+  // Camera Setup
+  cameraOK = camera_setup();
+  
+  // Initialize EMA frame with ambient
+  for(int i=0; i<768; i++) emaFrame[i] = 25.0;
 
-  // ── Firebase config — email/password auth ──
-  config.database_url = FIREBASE_HOST;
-  config.api_key = FIREBASE_API_KEY;
-  config.token_status_callback = tokenStatusCallback;
-  auth.user.email = FIREBASE_USER_EMAIL;
-  auth.user.password = FIREBASE_USER_PASS;
+  start_wifi();
+  server_setup();
+  multitasking_starts();
 
-  Firebase.begin(&config, &auth);
-  Firebase.reconnectWiFi(true);
-
-  Serial.print("[FIREBASE] Signing in as " + String(FIREBASE_USER_EMAIL));
-  lcdShow("Firebase...", "Signing in...");
-  while (!Firebase.ready()) {
-    Serial.print(".");
-    delay(300);
-  }
-  Serial.println("\n[FIREBASE] Signed in & ready");
-
-  // ── Read or initialise label ──
-  currentLabel = fetchOrInitLabel();
-
-  // ── Write initial status based on sensor reading ──
-  carPresent = readUltrasonic();
-  currentStatus = carPresent ? "busy" : "free";
-  writeStatus(currentStatus);
-  updateLED(carPresent);
-  lcdShow(currentLabel, currentStatus);
-  lastCarPresent = carPresent;
-
-  Serial.println("[BOOT] Complete — Label=" + currentLabel + "  Status=" + currentStatus);
-
-  // ── Start real-time stream on label path ──
-  if (!Firebase.RTDB.beginStream(&fbStream, labelPath().c_str())) {
-    Serial.println("[STREAM] Failed to start: " + fbStream.errorReason());
-  } else {
-    Serial.println("[STREAM] Listening on: " + labelPath());
-    Firebase.RTDB.setStreamCallback(&fbStream, onLabelStream, onStreamTimeout);
-  }
-
-  // ── Start real-time stream on booked path ──
-  if (!Firebase.RTDB.beginStream(&bookStream, bookPath().c_str())) {
-    Serial.println("[STREAM] Failed to start: " + bookStream.errorReason());
-  } else {
-    Serial.println("[STREAM] Listening on: " + bookPath());
-    Firebase.RTDB.setStreamCallback(&bookStream, onBookedStream, onStreamTimeout);
-  }
+  Serial.println(F("[ROOT] PID & Thermal Averaging Online.\n"));
 }
 
-// ══════════════════════════════════════════════
-//  LOOP
-// ══════════════════════════════════════════════
+void pump_setup() {
+    pinMode(PUMP_PIN, OUTPUT);
+    digitalWrite(PUMP_PIN, LOW);
+}
+
+void system_data_init() {
+    // 1. Create Mutex
+    dataMutex = xSemaphoreCreateMutex();
+    if (dataMutex == NULL) {
+        Serial.println(F("[FATAL] Mutex failed!"));
+        while (1) delay(1000);
+    }
+    Serial.println(F("[INIT] Mutex created"));
+
+    // 2. Load Preferences
+    prefs.begin("fire-system", false);
+    state.customHomeX = prefs.getInt("homeX", SERVO_HOME_X);
+    state.customHomeY = prefs.getInt("homeY", SERVO_HOME_Y);
+    
+    // Constraints check (in case garbage was in flash)
+    state.customHomeX = constrain(state.customHomeX, SERVO_X_MIN, SERVO_X_MAX);
+    state.customHomeY = constrain(state.customHomeY, SERVO_Y_MIN, SERVO_Y_MAX);
+    
+    state.manualTargetX = state.customHomeX;
+    state.manualTargetY = state.customHomeY;
+    
+    Serial.printf("[INIT] Persistent Home loaded: X=%d Y=%d\n", state.customHomeX, state.customHomeY);
+}
+
+void buzzer_setup() {
+    pinMode(BUZZER_PIN, OUTPUT);
+    noTone(BUZZER_PIN);
+}
+
+void setDoor(bool open) {
+    if (open) {
+        servoDoor.write(DOOR_OPEN);
+    } else {
+        servoDoor.write(DOOR_CLOSED);
+    }
+    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10))) {
+        state.doorOpen = open;
+        xSemaphoreGive(dataMutex);
+    }
+}
+
+
+void setBuzzer(bool on) {
+    if (on) {
+        tone(BUZZER_PIN, 2000);
+    } else {
+        noTone(BUZZER_PIN);
+    }
+}
+
+
+void setPump(bool on) {
+    digitalWrite(PUMP_PIN, on ? HIGH : LOW);
+    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10))) {
+        state.pumpOn = on;
+        xSemaphoreGive(dataMutex);
+    }
+}
+
 void loop() {
-  carPresent = readUltrasonic();
-
-  if (carPresent != lastCarPresent) {
-    currentStatus = carPresent ? "busy" : "free";
-    Serial.println("[STATUS CHANGE] " + String(lastCarPresent ? "busy" : "free") + " → " + currentStatus);
-
-    writeStatus(currentStatus);
-    updateLED(carPresent);
-    beepStatusChange();
-    lcdShow(currentLabel, currentStatus + userId);
-
-    lastCarPresent = carPresent;
-  }
-
-  checkBooking();
+  server.handleClient();
+  vTaskDelay(pdMS_TO_TICKS(5));
 }
 
-// ══════════════════════════════════════════════
-//  RTDB — WRITE STATUS
-// ══════════════════════════════════════════════
-void writeStatus(String status) {
-  Serial.println("[RTDB] Writing status → " + status);
-
-  if (Firebase.RTDB.setString(&fbWrite, statusPath().c_str(), status)) {
-    Serial.println("[RTDB] Status written OK");
-  } else {
-    Serial.println("[RTDB] Write failed: " + fbWrite.errorReason());
-  }
+void multitasking_starts() {
+    xTaskCreatePinnedToCore(
+        sensorTask,
+        "SensorTask",
+        8192,
+        NULL,
+        1,
+        &sensorHandle,
+        1);
+    
+    Serial.println(F("[INIT] Sensor Task launched — Core 1"));
 }
 
-// ══════════════════════════════════════════════
-//  RTDB — FETCH LABEL (write default if absent)
-// ══════════════════════════════════════════════
-String fetchOrInitLabel() {
-  Serial.println("[RTDB] Fetching label from: " + labelPath());
 
-  if (Firebase.RTDB.getString(&fbWrite, labelPath().c_str())) {
-    String lbl = fbWrite.stringData();
+void servos_setup() {
+  servoX.attach(SERVO_X_PIN);
+  servoY.attach(SERVO_Y_PIN);
+  servoDoor.attach(SERVO_DOOR_PIN);
 
-    if (lbl.length() > 0) {
-      Serial.println("[RTDB] Label found: " + lbl);
-      return lbl;
-    }
+  // Initial positions
+  servoX.write(SERVO_HOME_X);
+  servoY.write(SERVO_HOME_Y);
+  servoDoor.write(DOOR_CLOSED);
 
-    // Node exists but is empty
-    Serial.println("[RTDB] Label node empty, writing default");
-    return "not configured";
-
-  } else {
-    // Node does not exist
-    Serial.println("[RTDB] Label not found (" + fbWrite.errorReason() + "), writing default");
-    return "not configured";
+  if (xSemaphoreTake(dataMutex, portMAX_DELAY)) {
+    state.servoX = SERVO_HOME_X;
+    state.servoY = SERVO_HOME_Y;
+    state.doorOpen = false;
+    state.customHomeX = SERVO_HOME_X;
+    state.customHomeY = SERVO_HOME_Y;
+    state.manualTargetX = SERVO_HOME_X;
+    state.manualTargetY = SERVO_HOME_Y;
+    xSemaphoreGive(dataMutex);
   }
 }
 
-String readUserId(FirebaseData &fb, String path) {
-  if (!Firebase.RTDB.getString(&fb, path)) {
-    Serial.println("❌ Failed to read from Firebase");
-    return "";
-  }
 
-  String value = fb.stringData();
-
-  // لو فاضية
-  if (value.length() == 0) {
-    return "";
-  }
-
-  // لو أقل من 4 حروف → رجعها كلها
-  if (value.length() < 4) {
-    return value;
-  }
-
-  // رجع أول 4 حروف
-  return value.substring(0, 4);
-}
-
-// ══════════════════════════════════════════════
-//  ULTRASONIC — returns true if car is detected
-// ══════════════════════════════════════════════
-bool readUltrasonic() {
-  const int samples = 5;
-  int validCount = 0;
-  float sum = 0;
-
-  for (int i = 0; i < samples; i++) {
-    digitalWrite(TRIG_PIN, LOW);
-    delayMicroseconds(2);
-
-    digitalWrite(TRIG_PIN, HIGH);
-    delayMicroseconds(10);
-    digitalWrite(TRIG_PIN, LOW);
-
-    long duration = pulseIn(ECHO_PIN, HIGH, 30000);
-    int distance = duration * 0.034 / 2;
-
-    // Filter invalid readings
-    if (distance > 2 && distance < 500) {
-      sum += distance;
-      validCount++;
-    }
-
-    delay(50);  // allow sensor to settle
-  }
-
-  if (validCount == 0) {
-    Serial.println("[ULTRASONIC] Invalid reading");
+bool camera_setup() {
+  Wire.begin(21, 22);
+  Wire.setClock(400000);
+  Serial.print(F("[INIT] MLX90640... "));
+  if (!mlx.begin()) {
+    Serial.println(F("NOT FOUND! Check SDA(21)/SCL(22)."));
     return false;
-  }
-
-  int avgDistance = sum / validCount;
-
-  Serial.println("[ULTRASONIC] Avg Distance: " + String(avgDistance) + " cm");
-
-  return (avgDistance > 0 && avgDistance <= CAR_DISTANCE_CM);
-}
-
-// ══════════════════════════════════════════════
-//  LCD
-// ══════════════════════════════════════════════
-void lcdShow(String line1, String line2) {
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print(line1);
-  lcd.setCursor(0, 1);
-  lcd.print(line2);
-  Serial.println("[LCD] '" + line1 + "' | '" + line2 + "'");
-}
-
-// ══════════════════════════════════════════════
-//  RGB LED
-// ══════════════════════════════════════════════
-void updateLED(bool busy) {
-  digitalWrite(LED_RED_PIN, busy ? HIGH : LOW);
-  digitalWrite(LED_GREEN_PIN, busy ? LOW : HIGH);
-  Serial.println("[LED] " + String(busy ? "RED (busy)" : "GREEN (free)"));
-}
-
-// ══════════════════════════════════════════════
-//  BUZZER — 2 quick beeps on every status change
-// ══════════════════════════════════════════════
-void beepStatusChange() {
-  Serial.println("[BUZZER] 2 beeps");
-  for (int i = 0; i < 2; i++) {
-    digitalWrite(BUZZER_PIN, HIGH);
-    delay(100);
-    digitalWrite(BUZZER_PIN, LOW);
-    delay(100);
-  }
-}
-
-// ══════════════════════════════════════════════
-//  WIFI
-// ══════════════════════════════════════════════
-void connectWiFi() {
-  Serial.print("[WIFI] Connecting to " + String(WIFI_SSID));
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  lcdShow("Connecting WiFi", "");
-
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 40) {
-    delay(500);
-    Serial.print(".");
-    attempts++;
-  }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\n[WIFI] Connected — IP: " + WiFi.localIP().toString());
-    lcdShow("WiFi OK", WiFi.localIP().toString());
-    delay(1000);
   } else {
-    Serial.println("\n[WIFI] FAILED — check credentials");
-    lcdShow("WiFi FAILED", "Check config");
-    delay(3000);
+    mlx.setRefreshRate(MLX90640_4_HZ);
+    Serial.println(F("OK — 4 Hz"));
+    return true;
   }
 }
 
-time_t parseFirebaseTime(String isoTime) {
-  struct tm t;
-
-  sscanf(isoTime.c_str(),
-         "%d-%d-%dT%d:%d:%d",
-         &t.tm_year,
-         &t.tm_mon,
-         &t.tm_mday,
-         &t.tm_hour,
-         &t.tm_min,
-         &t.tm_sec);
-
-  t.tm_year -= 1900;  // important
-  t.tm_mon -= 1;
-
-  return mktime(&t);
-}
-
-bool isAfter10Minutes(time_t bookedTime) {
-  time_t now = time(nullptr);
-  double diff = difftime(now, bookedTime);
-  return diff >= 20;  // 600 seconds = 10 minutes
-}
-
-void checkBooking() {
-  if (isAfter10Minutes(bookedTime) && !timerFinished) {
-    timerFinished = true;
-    Serial.println("⏰ 10 minutes passed → Execute action");
-    userId = "";
-    lcdShow(currentLabel, "available");
+void findMaxTemp() {
+  if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(5))) {
+    state.maxTemp = state.frame[0];
+    state.maxIndex = 0;
+    for (int i = 1; i < 768; i++) {
+      if (state.frame[i] > state.maxTemp) {
+        state.maxTemp = state.frame[i];
+        state.maxIndex = i;
+      }
+    }
+    xSemaphoreGive(dataMutex);
   }
+}
+
+void gas_sensor_setup() {
+  pinMode(MQ2_PIN, INPUT);
+}
+
+void updateGasReading() {
+  int val = analogRead(MQ2_PIN);
+  if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10))) {
+    state.gasValue = val;
+    state.smokeDetected = (val > SMOKE_ADC_THRESHOLD);
+    xSemaphoreGive(dataMutex);
+  }
+}
+
+void sensorTask(void* pvParameters) {
+  while (true) {
+    // 1. Industrial-Level Thermal Averaging (EMA)
+    float rawFrame[768];
+    if (cameraOK && mlx.getFrame(rawFrame) == 0) {
+      if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10))) {
+        for (int i = 0; i < 768; i++) {
+          emaFrame[i] = (emaFrame[i] * (1.0f - THERMAL_EMA_ALPHA)) + (rawFrame[i] * THERMAL_EMA_ALPHA);
+          state.frame[i] = emaFrame[i];
+        }
+        findMaxTemp(); // Finds max on averaged data
+        xSemaphoreGive(dataMutex);
+      }
+    }
+
+    updateGasReading();
+
+    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10))) {
+      // Logic
+      if (!state.fireDetected) {
+        state.fireDetected = (state.maxTemp >= FIRE_TEMP_THRESHOLD);
+      } else {
+        state.fireDetected = (state.maxTemp >= (FIRE_TEMP_THRESHOLD - FIRE_HYSTERESIS));
+      }
+
+      bool alarmActive = state.fireDetected || state.smokeDetected;
+      setBuzzer(alarmActive);
+
+      if (alarmActive && !state.doorOpen) setDoor(true);
+      else if (!alarmActive && state.doorOpen) setDoor(false);
+
+      if (state.fireDetected) {
+        if (!state.pumpOn) setPump(true);
+        state.fireActive = true;
+        state.manualMode = false;
+
+        // Target from Thermal Data
+        int px = state.maxIndex % 32;
+        int py = state.maxIndex / 32;
+        float targetX = map(px, 0, 31, SERVO_X_MIN, SERVO_X_MAX);
+        float targetY = map(py, 0, 23, SERVO_Y_MIN, SERVO_Y_MAX);
+
+        // 2. Fire Tracking PID Controller
+        float errorX = targetX - smoothX;
+        float errorY = targetY - smoothY;
+
+        integralX += errorX;
+        integralY += errorY;
+        integralX = constrain(integralX, -50, 50); // Anti-windup
+        integralY = constrain(integralY, -50, 50);
+
+        float derivativeX = errorX - lastErrorX;
+        float derivativeY = errorY - lastErrorY;
+
+        float outputX = (errorX * PID_KP) + (integralX * PID_KI) + (derivativeX * PID_KD);
+        float outputY = (errorY * PID_KP) + (integralY * PID_KI) + (derivativeY * PID_KD);
+
+        smoothX += outputX;
+        smoothY += outputY;
+
+        lastErrorX = errorX;
+        lastErrorY = errorY;
+      } else {
+        if (state.pumpOn) setPump(false);
+        if (state.fireActive) {
+          state.manualTargetX = state.customHomeX;
+          state.manualTargetY = state.customHomeY;
+          state.fireActive = false;
+          integralX = 0; integralY = 0; // Reset PID
+        }
+
+        if (state.manualMode) {
+          smoothX += (state.manualTargetX - smoothX) * 0.2f;
+          smoothY += (state.manualTargetY - smoothY) * 0.2f;
+        } else {
+          smoothX += (state.customHomeX - smoothX) * 0.1f;
+          smoothY += (state.customHomeY - smoothY) * 0.1f;
+        }
+      }
+
+      // Output
+      int rx = constrain((int)round(smoothX), SERVO_X_MIN, SERVO_X_MAX);
+      int ry = constrain((int)round(smoothY), SERVO_Y_MIN, SERVO_Y_MAX);
+
+      if (abs(rx - lastWrittenX) >= SERVO_DEADBAND) {
+        servoX.write(rx);
+        state.servoX = lastWrittenX = rx;
+      }
+      if (abs(ry - lastWrittenY) >= SERVO_DEADBAND) {
+        servoY.write(ry);
+        state.servoY = lastWrittenY = ry;
+      }
+
+      xSemaphoreGive(dataMutex);
+    }
+
+    debugPrint();
+    vTaskDelay(pdMS_TO_TICKS(20));
+  }
+}
+
+void debugPrint() {
+  unsigned long now = millis();
+  if (now - lastDebugMs < DEBUG_INTERVAL_MS) return;
+  lastDebugMs = now;
+  if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(5))) {
+    Serial.printf("[DEBUG] T:%.1f Fire:%d Servo:[%d, %d]\n", state.maxTemp, state.fireDetected, state.servoX, state.servoY);
+    xSemaphoreGive(dataMutex);
+  }
+}
+
+void server_setup() {
+    server.on("/", HTTP_GET, []() {
+        Serial.println(F("[HTTP] Root page requested"));
+        server.sendHeader("Content-Type", "text/html; charset=UTF-8");
+        server.send_P(200, "text/html", INDEX_HTML);
+    });
+
+    server.on("/data", HTTP_GET, []() {
+        // Serial.println(F("[HTTP] Data poll")); // Optional: very spammy, keeping it off for now
+        server.sendHeader("Access-Control-Allow-Origin", "*");
+        String j;
+        j.reserve(256);
+        if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100))) {
+            j = F("{\"maxTemp\":");
+            j += String(state.maxTemp, 1);
+            j += F(",\"fire\":");
+            j += state.fireDetected ? F("true") : F("false");
+            j += F(",\"smoke\":");
+            j += state.smokeDetected ? F("true") : F("false");
+            j += F(",\"pumpOn\":");
+            j += state.pumpOn ? F("true") : F("false");
+            j += F(",\"gasRaw\":");
+            j += state.gasValue;
+            j += F(",\"servoX\":");
+            j += state.servoX;
+            j += F(",\"servoY\":");
+            j += state.servoY;
+            j += F(",\"threshold\":");
+            j += String(FIRE_TEMP_THRESHOLD, 0);
+            j += F(",\"uptime\":");
+            j += millis() / 1000;
+            j += F(",\"doorOpen\":");
+            j += state.doorOpen ? F("true") : F("false");
+            j += F(",\"homeX\":");
+            j += state.customHomeX;
+            j += F(",\"homeY\":");
+            j += state.customHomeY;
+            j += F("}");
+            xSemaphoreGive(dataMutex);
+        } else {
+            j = F("{\"error\":\"busy\"}");
+        }
+        server.send(200, "application/json", j);
+    });
+
+    server.on("/frame", HTTP_GET, []() {
+        server.sendHeader("Access-Control-Allow-Origin", "*");
+        String j;
+        j.reserve(768 * 6);
+        j = "[";
+        if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(200))) {
+            for (int i = 0; i < 768; i++) {
+                j += String(state.frame[i], 1);
+                if (i < 767) j += ",";
+            }
+            xSemaphoreGive(dataMutex);
+        } else {
+            server.send(503, "application/json", "[]");
+            return;
+        }
+        j += "]";
+        server.send(200, "application/json", j);
+    });
+
+    server.on("/move", HTTP_GET, []() {
+        server.sendHeader("Access-Control-Allow-Origin", "*");
+        String dir = server.arg("dir");
+        if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50))) {
+            Serial.printf("[HTTP] Move request: %s\n", dir.c_str());
+            if (dir == "left") state.manualTargetX = constrain(state.manualTargetX - 10, SERVO_X_MIN, SERVO_X_MAX);
+            else if (dir == "right") state.manualTargetX = constrain(state.manualTargetX + 10, SERVO_X_MIN, SERVO_X_MAX);
+            else if (dir == "up") state.manualTargetY = constrain(state.manualTargetY - 10, SERVO_Y_MIN, SERVO_Y_MAX);
+            else if (dir == "down") state.manualTargetY = constrain(state.manualTargetY + 10, SERVO_Y_MIN, SERVO_Y_MAX);
+            else if (dir == "home") {
+                state.manualTargetX = state.customHomeX;
+                state.manualTargetY = state.customHomeY;
+                Serial.printf("[MANUAL] Returning to Home: X=%d Y=%d\n", state.customHomeX, state.customHomeY);
+            } else if (dir == "sethome") {
+                state.customHomeX = state.manualTargetX;
+                state.customHomeY = state.manualTargetY;
+                prefs.putInt("homeX", state.customHomeX);
+                prefs.putInt("homeY", state.customHomeY);
+                Serial.printf("[MANUAL] Home saved to Flash: X=%d Y=%d\n", state.customHomeX, state.customHomeY);
+            }
+            state.manualMode = true;
+            xSemaphoreGive(dataMutex);
+        } else {
+            Serial.println(F("[HTTP] Move failed - Mutex busy"));
+        }
+        server.send(200, "text/plain", "OK");
+    });
+
+    server.begin();
+    Serial.println(F("[INIT] HTTP server started"));
+}
+
+void start_wifi() {
+  WiFi.softAP(WIFI_SSID, WIFI_PASS);
+  Serial.print(F("[INIT] WiFi AP: "));
+  Serial.print(WIFI_SSID);
+  Serial.print(F(" IP: "));
+  Serial.println(WiFi.softAPIP());
 }
