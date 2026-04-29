@@ -1,189 +1,199 @@
-#include <SPI.h>
-#include <MFRC522.h>
-#include <Wire.h>
-#include <LiquidCrystal_I2C.h>
+import RPi.GPIO as GPIO
+import time
 
-/*
-PINOUT:
-RC522 MODULE    Uno/Nano     MEGA
-SDA             D10          D9
-SCK             D13          D52
-MOSI            D11          D51
-MISO            D12          D50
-IRQ             N/A          N/A
-GND             GND          GND
-RST             D9           D8
-3.3V            3.3V         3.3V
-*/
-
-#define SS_PIN 53
-#define RST_PIN 5
-
-#define RED_PIN 6
-#define GREEN_PIN 7
-#define BLUE_PIN 8
-
-#define SIM800 Serial1
-
-// ================= OBJECTS =================
-MFRC522 rfid(SS_PIN, RST_PIN);
-LiquidCrystal_I2C lcd(0x27, 16, 2);
-
-// ================= INIT FUNCTIONS =================
-void initLCD() {
-  lcd.init();
-  lcd.backlight();
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("LCD Ready");
+MOTOR_PINS = {
+    'AIN1': 22,   # Input 1 for Motor A (Left Motor)
+    'AIN2': 27,   # Input 2 for Motor A (Left Motor)
+    'BIN1': 13,   # Input 1 for Motor B (Right Motor)
+    'BIN2': 19,   # Input 2 for Motor B (Right Motor)
+    'PWM_A': 23,  # PWM Enable pin for Motor A
+    'PWM_B': 24,  # PWM Enable pin for Motor B
 }
 
-void initRFID() {
-  SPI.begin();
-  rfid.PCD_Init();
-  Serial.println("RFID Ready");
-}
+# GPIO pins for the 5 IR sensors (order: leftmost to rightmost)
+SENSOR_PINS = [2, 3, 4, 17, 27]  # GPIO2, GPIO3, GPIO4, GPIO17, GPIO27
 
-void initSIM800() {
-  SIM800.begin(9600);
-  delay(1000);
-  Serial.println("SIM800 Ready");
-}
+# Motor speed and turning parameters (adjust as needed)
+BASE_SPEED = 50      # Base speed percentage (0-100)
+TURN_SPEED = 40      # Speed for turning (lower = smoother turns)
+MAX_SPEED = 80       # Maximum motor speed
+MIN_SPEED = 0        # Minimum motor speed
 
-void initRGB() {
-  pinMode(RED_PIN, OUTPUT);
-  pinMode(GREEN_PIN, OUTPUT);
-  pinMode(BLUE_PIN, OUTPUT);
-}
+SENSOR_THRESHOLD = 500
 
-// ================= LCD FUNCTIONS =================
-void lcdPrint(String line1, String line2 = "") {
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print(line1);
-  lcd.setCursor(0, 1);
-  lcd.print(line2);
-}
+GPIO.setmode(GPIO.BCM)  # Use Broadcom pin numbering
 
-// ================= RGB FUNCTIONS =================
-void setRGB(int r, int g, int b) {
-  analogWrite(RED_PIN, r);
-  analogWrite(GREEN_PIN, g);
-  analogWrite(BLUE_PIN, b);
-}
+for pin in MOTOR_PINS.values():
+    GPIO.setup(pin, GPIO.OUT)
+    GPIO.output(pin, GPIO.LOW)
 
-// ================= RFID FUNCTIONS =================
-String readRFID() {
-  if (!rfid.PICC_IsNewCardPresent()) return "";
-  if (!rfid.PICC_ReadCardSerial()) return "";
+# Setup PWM on the enable pins
+pwm_a = GPIO.PWM(MOTOR_PINS['PWM_A'], 1000)  # 1kHz frequency
+pwm_b = GPIO.PWM(MOTOR_PINS['PWM_B'], 1000)
+pwm_a.start(0)
+pwm_b.start(0)
 
-  String uid = "";
-  for (byte i = 0; i < rfid.uid.size; i++) {
-    uid += String(rfid.uid.uidByte[i], HEX);
-  }
+# Setup sensor pins as inputs
+for pin in SENSOR_PINS:
+    GPIO.setup(pin, GPIO.IN)
 
-  uid.toUpperCase();
-  rfid.PICC_HaltA();
-  return uid;
-}
+def set_motor_speed(speed_a, speed_b):
+    # Left motor (Motor A)
+    if speed_a >= 0:
+        GPIO.output(MOTOR_PINS['AIN1'], GPIO.HIGH)
+        GPIO.output(MOTOR_PINS['AIN2'], GPIO.LOW)
+        pwm_a.ChangeDutyCycle(speed_a)
+    else:
+        GPIO.output(MOTOR_PINS['AIN1'], GPIO.LOW)
+        GPIO.output(MOTOR_PINS['AIN2'], GPIO.HIGH)
+        pwm_a.ChangeDutyCycle(-speed_a)
 
-// ================= SIM800 FUNCTIONS =================
-void sendAT(String cmd) {
-  SIM800.println(cmd);
-  delay(500);
-  while (SIM800.available()) {
-    Serial.write(SIM800.read());
-  }
-}
+    # Right motor (Motor B)
+    if speed_b >= 0:
+        GPIO.output(MOTOR_PINS['BIN1'], GPIO.HIGH)
+        GPIO.output(MOTOR_PINS['BIN2'], GPIO.LOW)
+        pwm_b.ChangeDutyCycle(speed_b)
+    else:
+        GPIO.output(MOTOR_PINS['BIN1'], GPIO.LOW)
+        GPIO.output(MOTOR_PINS['BIN2'], GPIO.HIGH)
+        pwm_b.ChangeDutyCycle(-speed_b)
 
-void sendSMS(String number, String message) {
-  sendAT("AT+CMGF=1");  // text mode
-  delay(500);
+def stop_motors():
+    """Stops both motors."""
+    set_motor_speed(0, 0)
 
-  SIM800.print("AT+CMGS=\"");
-  SIM800.print(number);
-  SIM800.println("\"");
-  delay(500);
+def read_sensors():
+    sensor_values = []
+    for pin in SENSOR_PINS:
+        value = GPIO.input(pin)
+        sensor_values.append(value)
+    return sensor_values
 
-  SIM800.print(message);
-  delay(500);
+def test_motors():
+    print("\n--- Motor Test Starting ---")
+    input("Press Enter to move FORWARD...")
+    set_motor_speed(BASE_SPEED, BASE_SPEED)
+    time.sleep(2)
 
-  SIM800.write(26);  // CTRL+Z
-  delay(3000);
-}
+    input("Press Enter to move BACKWARD...")
+    set_motor_speed(-BASE_SPEED, -BASE_SPEED)
+    time.sleep(2)
 
-// ================= TEST FUNCTIONS =================
-void testLCD() {
-  lcdPrint("Testing LCD", "Working...");
-  delay(2000);
-}
+    input("Press Enter to turn LEFT...")
+    set_motor_speed(-TURN_SPEED, TURN_SPEED)
+    time.sleep(2)
 
-void testRGB() {
-  setRGB(255, 0, 0);
-  delay(500);
-  setRGB(0, 255, 0);
-  delay(500);
-  setRGB(0, 0, 255);
-  delay(500);
-  setRGB(255, 255, 255);
-  delay(500);
-  setRGB(0, 0, 0);
-}
+    input("Press Enter to turn RIGHT...")
+    set_motor_speed(TURN_SPEED, -TURN_SPEED)
+    time.sleep(2)
 
-void testSIM800() {
-  sendAT("AT");
-  sendAT("AT+CSQ");  // signal quality
-}
+    input("Press Enter to STOP...")
+    stop_motors()
+    print("--- Motor Test Complete ---\n")
 
-void testRFID() {
-  lcdPrint("Scan Card...");
-  while (true) {
-    String id = readRFID();
-    if (id != "") {
-      Serial.println("Card UID: " + id);
-      lcdPrint("Card Detected", id);
-      setRGB(0, 255, 0);
-      delay(2000);
-      break;
-    }
-  }
-}
+def test_sensors():
+    print("\n--- Sensor Test ---")
+    print("Place the robot on line and surface to see sensor values.")
+    print("Press Ctrl+C to exit test.\n")
+    try:
+        while True:
+            sensors = read_sensors()
+            visual = ''.join(['X' if s else '-' for s in sensors])
+            print(f"Sensors: {sensors} -> {visual}", end='\r')
+            time.sleep(0.1)
+    except KeyboardInterrupt:
+        print("\n--- Sensor Test Complete ---\n")
 
-// ================= SETUP =================
-void setup() {
-  Serial.begin(9600);
+def line_follower_logic():
 
-  initLCD();
-  initRGB();
-  initRFID();
-  initSIM800();
+    sensors = read_sensors()
+    error = 0
+    
+    if sensors == [1, 0, 0, 0, 0]:
+        error = -2  # Line is far left
+    elif sensors == [0, 1, 0, 0, 0]:
+        error = -1  # Line is slightly left
+    elif sensors == [0, 0, 1, 0, 0]:
+        error = 0   # Line is centered
+    elif sensors == [0, 0, 0, 1, 0]:
+        error = 1   # Line is slightly right
+    elif sensors == [0, 0, 0, 0, 1]:
+        error = 2   # Line is far right
+    elif sensors == [1, 1, 0, 0, 0]:
+        error = -2  # Line is left (on junction/curve)
+    elif sensors == [0, 0, 0, 1, 1]:
+        error = 2   # Line is right (on junction/curve)
+    elif sensors == [1, 1, 1, 0, 0]:
+        error = -2
+    elif sensors == [0, 0, 1, 1, 1]:
+        error = 2
+    elif sensors == [1, 1, 1, 1, 1]:
+        print("--- End of line detected! ---")
+        stop_motors()
+        return 0, 0
+    else:
+        # Default fallback (should not happen with clean line)
+        error = 0
+    
+    # Calculate motor speeds based on error
+    if error == 0:
+        # Move straight
+        left_speed = BASE_SPEED
+        right_speed = BASE_SPEED
+    elif error == -2:  # Sharp left turn
+        left_speed = -TURN_SPEED   # Left motor reverse
+        right_speed = TURN_SPEED   # Right motor forward
+    elif error == -1:  # Soft left turn
+        left_speed = 0             # Left motor stop
+        right_speed = BASE_SPEED   # Right motor forward
+    elif error == 1:   # Soft right turn
+        left_speed = BASE_SPEED    # Left motor forward
+        right_speed = 0            # Right motor stop
+    elif error == 2:   # Sharp right turn
+        left_speed = TURN_SPEED    # Left motor forward
+        right_speed = -TURN_SPEED  # Right motor reverse
+    else:
+        left_speed = BASE_SPEED
+        right_speed = BASE_SPEED
+    
+    # Apply speed limits
+    left_speed = max(MIN_SPEED, min(MAX_SPEED, left_speed))
+    right_speed = max(MIN_SPEED, min(MAX_SPEED, right_speed))
+    
+    return left_speed, right_speed
 
-  // testLCD();
-  // testRGB();
-  // testSIM800();
-}
+def main():
+    print("\n" + "="*50)
+    print("  Raspberry Pi Line Follower Robot")
+    print("="*50)
+    
+    # Optional: Motor test
+    response = input("\nRun motor test? (y/n): ").lower()
+    if response == 'y':
+        test_motors()
+    
+    # Optional: Sensor test
+    response = input("Run sensor test? (y/n): ").lower()
+    if response == 'y':
+        test_sensors()
+    
+    print("\n--- Starting Line Following ---")
+    print("Place robot on the line track.")
+    print("Press Ctrl+C to stop.\n")
+    
+    try:
+        while True:
+            left_speed, right_speed = line_follower_logic()
+            set_motor_speed(left_speed, right_speed)
+            time.sleep(0.02)  # Small delay for stability
+            
+    except KeyboardInterrupt:
+        print("\n\n--- Stopping robot ---")
+        stop_motors()
+        pwm_a.stop()
+        pwm_b.stop()
+        GPIO.cleanup()
+        print("GPIO cleaned up. Goodbye!")
 
-void code() {
-  // RFID continuous read
-  String cardID = readRFID();
-
-  if (cardID != "") {
-    Serial.println("UID: " + cardID);
-
-    lcdPrint("Access Card:", cardID);
-
-    setRGB(0, 255, 0);
-
-    // Example: send SMS when scanned
-    sendSMS("+201XXXXXXXXX", "Card Detected: " + cardID);
-
-    delay(3000);
-    setRGB(0, 0, 0);
-  }
-}
-
-// ================= LOOP =================
-void loop() {
-  code();
-  delay(20);
-}
+if __name__ == "__main__":
+    main()
