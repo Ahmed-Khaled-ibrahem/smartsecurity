@@ -1,19 +1,15 @@
 #include <Servo.h>
 #include <Keypad.h>
 
-#define TEST_MODE true
-
 const int SERVO_PINS[7] = { 2, 3, 4, 5, 6, 7, 8 };
-//                          a  b  c  d  e  f  g
+//                           a  b  c  d  e  f  g
 
-// Servo angle when segment is ON  (face visible / arm "closed")
-const int SERVO_ON = 90;
+const int SERVO_ON = 0;    // Servo angle when segment is ON
+const int SERVO_OFF = 90;  // Servo angle when segment is OFF
 
-// Servo angle when segment is OFF (face hidden  / arm "open")
-const int SERVO_OFF = 0;
-
-// Delay between each segment sweep step (ms) — set 0 for instant
 const int SEGMENT_SWEEP_DELAY = 60;
+
+const int COUNT_STEP_MS = 800;
 
 const byte ROWS = 4;
 const byte COLS = 4;
@@ -25,8 +21,8 @@ char KEYPAD_KEYS[ROWS][COLS] = {
   { '*', '0', '#', 'D' }
 };
 
-byte ROW_PINS[ROWS] = { 22, 23, 24, 25 };
-byte COL_PINS[COLS] = { 26, 27, 28, 29 };
+byte ROW_PINS[ROWS] = { 26, 27, 28, 29 };
+byte COL_PINS[COLS] = { 22, 23, 24, 25 };
 
 const bool DIGITS[10][7] = {
   //   a  b  c  d  e  f  g
@@ -42,36 +38,33 @@ const bool DIGITS[10][7] = {
   { 1, 1, 1, 1, 0, 1, 1 },  // 9
 };
 
-// Segment names for Serial output (matches index order a–g)
-const char* SEGMENT_NAMES[7] = { "a (top)", "b (top-right)", "c (bottom-right)",
-                                 "d (bottom)", "e (bottom-left)", "f (top-left)", "g (middle)" };
+const char* SEGMENT_NAMES[7] = {
+  "a (top)", "b (top-right)", "c (bottom-right)",
+  "d (bottom)", "e (bottom-left)", "f (top-left)", "g (middle)"
+};
 
 const int BLINK_INTERVAL_MS = 400;
 const int CHASE_INTERVAL_MS = 150;
 
-// How long each servo stays ON during the test sweep (ms)
-const int TEST_ON_DURATION = 1200;
-
-// Pause between testing each servo (ms)
-const int TEST_PAUSE = 400;
-
-// How many times to repeat the full sweep at startup
-const int TEST_REPEAT_TIMES = 2;
-
 Servo servos[7];
 Keypad keypad = Keypad(makeKeymap(KEYPAD_KEYS), ROW_PINS, COL_PINS, ROWS, COLS);
 
-enum Mood { MOOD_NORMAL,
-            MOOD_BLINK,
-            MOOD_CHASE,
-            MOOD_WAVE,
-            MOOD_OFF };
+enum Mood {
+  MOOD_NORMAL,
+  MOOD_COUNT_UP,
+  MOOD_COUNT_DOWN,
+  MOOD_WAVE,
+  MOOD_OFF
+};
 Mood currentMood = MOOD_NORMAL;
 
 bool blinkState = false;
 int chaseIndex = 0;
 unsigned long lastMoodTick = 0;
 bool currentPattern[7] = { 0 };
+
+int countCurrent = 0;       // digit currently on display during count
+bool countRunning = false;  // is the counter actively ticking?
 
 void setSegment(int seg, bool on) {
   servos[seg].write(on ? SERVO_ON : SERVO_OFF);
@@ -108,97 +101,70 @@ void allOn() {
   Serial.println(F("[DISPLAY] All ON"));
 }
 
-void runServoTest() {
-  Serial.println(F(""));
-  Serial.println(F("========================================"));
-  Serial.println(F("  SERVO TEST MODE"));
-  Serial.println(F("  Each servo will move one at a time."));
-  Serial.println(F("  Watch which arm/segment moves and"));
-  Serial.println(F("  note the segment name shown here."));
-  Serial.println(F("========================================"));
-  Serial.println(F(""));
-
-  for (int rep = 0; rep < TEST_REPEAT_TIMES; rep++) {
-
-    Serial.print(F("--- Sweep #"));
-    Serial.print(rep + 1);
-    Serial.println(F(" ---"));
-
-    for (int i = 0; i < 7; i++) {
-      // All off first so only one servo is clearly moving
-      allOff(true);
-      delay(TEST_PAUSE);
-
-      Serial.print(F("  >> Moving Servo["));
-      Serial.print(i);
-      Serial.print(F("] — Segment "));
-      Serial.println(SEGMENT_NAMES[i]);
-      Serial.print(F("     Pin: "));
-      Serial.println(SERVO_PINS[i]);
-
-      // Move this one servo to ON position
-      servos[i].write(SERVO_ON);
-      delay(TEST_ON_DURATION);
-
-      // Move back to OFF
-      servos[i].write(SERVO_OFF);
-      delay(TEST_PAUSE);
-    }
-
-    Serial.println(F(""));
-  }
-
-  // End of test: flash all ON/OFF three times as "done" signal
-  Serial.println(F("========================================"));
-  Serial.println(F("  TEST COMPLETE — entering normal mode"));
-  Serial.println(F("========================================"));
-
-  for (int flash = 0; flash < 3; flash++) {
-    allOn();
-    delay(300);
-    allOff(true);
-    delay(300);
-  }
-}
-
-void handleMoodKey(char key) {
-  Serial.print(F("[MOOD] Key: "));
+void handleKey(char key) {
+  Serial.print(F("[KEY] Pressed: "));
   Serial.println(key);
-  currentMood = MOOD_NORMAL;
+
+  // --- Digit keys ---
+  if (key >= '0' && key <= '9') {
+    currentMood = MOOD_NORMAL;
+    countRunning = false;
+    showDigit(key - '0');
+    return;
+  }
 
   switch (key) {
 
-    case 'A':  // Blink current display
-      Serial.println(F("[MOOD] Blink ON"));
-      currentMood = MOOD_BLINK;
-      blinkState = true;
+    case 'A':  
+      if (currentMood == MOOD_COUNT_UP) {
+        countRunning = !countRunning;
+        Serial.println(countRunning ? F("[COUNT] Resumed UP") : F("[COUNT] Paused"));
+      } else {
+        currentMood = MOOD_COUNT_UP;
+        countCurrent = 1;
+        countRunning = true;
+        lastMoodTick = millis() - COUNT_STEP_MS; 
+        Serial.println(F("[COUNT] Start UP 1→9"));
+      }
       break;
 
-    case 'B':  // Chasing single segment
-      Serial.println(F("[MOOD] Chase ON"));
-      allOff(true);
-      chaseIndex = 0;
-      currentMood = MOOD_CHASE;
+    case 'B': 
+      if (currentMood == MOOD_COUNT_DOWN) {
+        countRunning = !countRunning;
+        Serial.println(countRunning ? F("[COUNT] Resumed DOWN") : F("[COUNT] Paused"));
+      } else {
+        currentMood = MOOD_COUNT_DOWN;
+        countCurrent = 9;
+        countRunning = true;
+        lastMoodTick = millis() - COUNT_STEP_MS;  // show first digit immediately
+        Serial.println(F("[COUNT] Start DOWN 9→1"));
+      }
       break;
 
     case 'C':  // Wave animation
       Serial.println(F("[MOOD] Wave ON"));
       currentMood = MOOD_WAVE;
+      countRunning = false;
       break;
 
     case 'D':  // Blank / clear
       Serial.println(F("[MOOD] Clear"));
-      allOff();
       currentMood = MOOD_OFF;
+      countRunning = false;
+      allOff();
       break;
 
     case '*':  // All segments ON
       Serial.println(F("[MOOD] All ON"));
+      currentMood = MOOD_NORMAL;
+      countRunning = false;
       allOn();
       break;
 
-    case '#':
-      {  // Random digit
+    case '#':  // Random digit
+      {
+        currentMood = MOOD_NORMAL;
+        countRunning = false;
         int r = random(0, 10);
         Serial.print(F("[MOOD] Random digit: "));
         Serial.println(r);
@@ -213,24 +179,39 @@ void tickMood() {
 
   switch (currentMood) {
 
-    case MOOD_BLINK:
-      if (now - lastMoodTick >= (unsigned long)BLINK_INTERVAL_MS) {
+    // ------ Count UP 1 → 9 ------
+    case MOOD_COUNT_UP:
+      if (!countRunning) break;
+      if (now - lastMoodTick >= (unsigned long)COUNT_STEP_MS) {
         lastMoodTick = now;
-        blinkState = !blinkState;
-        for (int i = 0; i < 7; i++)
-          setSegment(i, blinkState ? currentPattern[i] : false);
+        showDigit(countCurrent, false);  // no sweep delay during auto-count
+        if (countCurrent < 9) {
+          countCurrent++;
+        } else {
+          // Reached 9 — stop automatically
+          countRunning = false;
+          Serial.println(F("[COUNT] Reached 9, stopped"));
+        }
       }
       break;
 
-    case MOOD_CHASE:
-      if (now - lastMoodTick >= (unsigned long)CHASE_INTERVAL_MS) {
+    // ------ Count DOWN 9 → 1 ------
+    case MOOD_COUNT_DOWN:
+      if (!countRunning) break;
+      if (now - lastMoodTick >= (unsigned long)COUNT_STEP_MS) {
         lastMoodTick = now;
-        allOff(true);
-        setSegment(chaseIndex, true);
-        chaseIndex = (chaseIndex + 1) % 7;
+        showDigit(countCurrent, false);
+        if (countCurrent > 1) {
+          countCurrent--;
+        } else {
+          // Reached 1 — stop automatically
+          countRunning = false;
+          Serial.println(F("[COUNT] Reached 1, stopped"));
+        }
       }
       break;
 
+    // ------ Wave ------
     case MOOD_WAVE:
       {
         static int waveStep = 0;
@@ -266,7 +247,6 @@ void setup() {
   Serial.begin(9600);
   Serial.println(F("[BOOT] Servo 7-Segment Display — Arduino Mega"));
 
-  // Attach all servos and park them at OFF position
   for (int i = 0; i < 7; i++) {
     servos[i].attach(SERVO_PINS[i]);
     servos[i].write(SERVO_OFF);
@@ -276,17 +256,10 @@ void setup() {
     Serial.println(SERVO_PINS[i]);
   }
 
-  delay(500);  // Let servos settle before test/startup
+  delay(500);
+  randomSeed(analogRead(A0));
 
-  randomSeed(analogRead(A0));  // Seed random from floating ADC
-
-  // ----- TEST MODE -----
-  if (TEST_MODE) {
-    runServoTest();
-    // After test, show digit 0 and wait for keypad
-  }
-
-  // Startup animation: sweep all ON then show 0
+  // Startup animation: flash all ON then show 0
   allOn();
   delay(600);
   showDigit(0);
@@ -296,15 +269,6 @@ void setup() {
 
 void loop() {
   char key = keypad.getKey();
-
-  if (key) {
-    if (key >= '0' && key <= '9') {
-      currentMood = MOOD_NORMAL;
-      showDigit(key - '0');
-    } else {
-      handleMoodKey(key);
-    }
-  }
-
+  if (key) handleKey(key);
   tickMood();
 }
