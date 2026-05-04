@@ -1,133 +1,310 @@
-import RPi.GPIO as GPIO
-import time
+#include <Servo.h>
+#include <Keypad.h>
 
-MOTOR_PINS = {
-    'AIN1': 18,
-    'AIN2': 17,
-    'BIN1': 22,
-    'BIN2': 27,
-    'PWM_A': 13,
-    'PWM_B': 19,
+#define TEST_MODE true
+
+const int SERVO_PINS[7] = { 2, 3, 4, 5, 6, 7, 8 };
+//                          a  b  c  d  e  f  g
+
+// Servo angle when segment is ON  (face visible / arm "closed")
+const int SERVO_ON = 90;
+
+// Servo angle when segment is OFF (face hidden  / arm "open")
+const int SERVO_OFF = 0;
+
+// Delay between each segment sweep step (ms) — set 0 for instant
+const int SEGMENT_SWEEP_DELAY = 60;
+
+const byte ROWS = 4;
+const byte COLS = 4;
+
+char KEYPAD_KEYS[ROWS][COLS] = {
+  { '1', '2', '3', 'A' },
+  { '4', '5', '6', 'B' },
+  { '7', '8', '9', 'C' },
+  { '*', '0', '#', 'D' }
+};
+
+byte ROW_PINS[ROWS] = { 22, 23, 24, 25 };
+byte COL_PINS[COLS] = { 26, 27, 28, 29 };
+
+const bool DIGITS[10][7] = {
+  //   a  b  c  d  e  f  g
+  { 1, 1, 1, 1, 1, 1, 0 },  // 0
+  { 0, 1, 1, 0, 0, 0, 0 },  // 1
+  { 1, 1, 0, 1, 1, 0, 1 },  // 2
+  { 1, 1, 1, 1, 0, 0, 1 },  // 3
+  { 0, 1, 1, 0, 0, 1, 1 },  // 4
+  { 1, 0, 1, 1, 0, 1, 1 },  // 5
+  { 1, 0, 1, 1, 1, 1, 1 },  // 6
+  { 1, 1, 1, 0, 0, 0, 0 },  // 7
+  { 1, 1, 1, 1, 1, 1, 1 },  // 8
+  { 1, 1, 1, 1, 0, 1, 1 },  // 9
+};
+
+// Segment names for Serial output (matches index order a–g)
+const char* SEGMENT_NAMES[7] = { "a (top)", "b (top-right)", "c (bottom-right)",
+                                 "d (bottom)", "e (bottom-left)", "f (top-left)", "g (middle)" };
+
+const int BLINK_INTERVAL_MS = 400;
+const int CHASE_INTERVAL_MS = 150;
+
+// How long each servo stays ON during the test sweep (ms)
+const int TEST_ON_DURATION = 1200;
+
+// Pause between testing each servo (ms)
+const int TEST_PAUSE = 400;
+
+// How many times to repeat the full sweep at startup
+const int TEST_REPEAT_TIMES = 2;
+
+Servo servos[7];
+Keypad keypad = Keypad(makeKeymap(KEYPAD_KEYS), ROW_PINS, COL_PINS, ROWS, COLS);
+
+enum Mood { MOOD_NORMAL,
+            MOOD_BLINK,
+            MOOD_CHASE,
+            MOOD_WAVE,
+            MOOD_OFF };
+Mood currentMood = MOOD_NORMAL;
+
+bool blinkState = false;
+int chaseIndex = 0;
+unsigned long lastMoodTick = 0;
+bool currentPattern[7] = { 0 };
+
+void setSegment(int seg, bool on) {
+  servos[seg].write(on ? SERVO_ON : SERVO_OFF);
 }
 
-# ── 3 IR Sensors (LEFT, CENTER, RIGHT) ──
-SENSOR_PINS = [23, 25, 24]
+void showPattern(const bool pattern[7], bool animated = true) {
+  for (int i = 0; i < 7; i++) {
+    currentPattern[i] = pattern[i];
+    setSegment(i, pattern[i]);
+    if (animated && SEGMENT_SWEEP_DELAY > 0) delay(SEGMENT_SWEEP_DELAY);
+  }
+}
 
-BASE_SPEED = 60
-TURN_SPEED = 80
-MAX_SPEED = 100
-MIN_SPEED = 0
+void showDigit(int d, bool animated = true) {
+  if (d < 0 || d > 9) return;
+  Serial.print(F("[DISPLAY] Digit: "));
+  Serial.println(d);
+  showPattern(DIGITS[d], animated);
+}
 
-GPIO.setmode(GPIO.BCM)
+void allOff(bool silent = false) {
+  for (int i = 0; i < 7; i++) {
+    currentPattern[i] = false;
+    setSegment(i, false);
+  }
+  if (!silent) Serial.println(F("[DISPLAY] All OFF"));
+}
 
-for pin in MOTOR_PINS.values():
-    GPIO.setup(pin, GPIO.OUT)
-    GPIO.output(pin, GPIO.LOW)
+void allOn() {
+  for (int i = 0; i < 7; i++) {
+    currentPattern[i] = true;
+    setSegment(i, true);
+  }
+  Serial.println(F("[DISPLAY] All ON"));
+}
 
-pwm_a = GPIO.PWM(MOTOR_PINS['PWM_A'], 1000)
-pwm_b = GPIO.PWM(MOTOR_PINS['PWM_B'], 1000)
-pwm_a.start(0)
-pwm_b.start(0)
+void runServoTest() {
+  Serial.println(F(""));
+  Serial.println(F("========================================"));
+  Serial.println(F("  SERVO TEST MODE"));
+  Serial.println(F("  Each servo will move one at a time."));
+  Serial.println(F("  Watch which arm/segment moves and"));
+  Serial.println(F("  note the segment name shown here."));
+  Serial.println(F("========================================"));
+  Serial.println(F(""));
 
-for pin in SENSOR_PINS:
-    GPIO.setup(pin, GPIO.IN)
+  for (int rep = 0; rep < TEST_REPEAT_TIMES; rep++) {
 
+    Serial.print(F("--- Sweep #"));
+    Serial.print(rep + 1);
+    Serial.println(F(" ---"));
 
-def set_motor_speed(speed_a, speed_b):
-    # Left motor
-    if speed_a >= 0:
-        GPIO.output(MOTOR_PINS['AIN1'], GPIO.HIGH)
-        GPIO.output(MOTOR_PINS['AIN2'], GPIO.LOW)
-        pwm_a.ChangeDutyCycle(min(abs(speed_a), 100))
-    else:
-        GPIO.output(MOTOR_PINS['AIN1'], GPIO.LOW)
-        GPIO.output(MOTOR_PINS['AIN2'], GPIO.HIGH)
-        pwm_a.ChangeDutyCycle(min(abs(speed_a), 100))
+    for (int i = 0; i < 7; i++) {
+      // All off first so only one servo is clearly moving
+      allOff(true);
+      delay(TEST_PAUSE);
 
-    # Right motor
-    if speed_b >= 0:
-        GPIO.output(MOTOR_PINS['BIN1'], GPIO.HIGH)
-        GPIO.output(MOTOR_PINS['BIN2'], GPIO.LOW)
-        pwm_b.ChangeDutyCycle(min(abs(speed_b), 100))
-    else:
-        GPIO.output(MOTOR_PINS['BIN1'], GPIO.LOW)
-        GPIO.output(MOTOR_PINS['BIN2'], GPIO.HIGH)
-        pwm_b.ChangeDutyCycle(min(abs(speed_b), 100))
+      Serial.print(F("  >> Moving Servo["));
+      Serial.print(i);
+      Serial.print(F("] — Segment "));
+      Serial.println(SEGMENT_NAMES[i]);
+      Serial.print(F("     Pin: "));
+      Serial.println(SERVO_PINS[i]);
 
+      // Move this one servo to ON position
+      servos[i].write(SERVO_ON);
+      delay(TEST_ON_DURATION);
 
-def stop_motors():
-    set_motor_speed(0, 0)
+      // Move back to OFF
+      servos[i].write(SERVO_OFF);
+      delay(TEST_PAUSE);
+    }
 
+    Serial.println(F(""));
+  }
 
-def read_sensors():
-    return [GPIO.input(pin) for pin in SENSOR_PINS]
+  // End of test: flash all ON/OFF three times as "done" signal
+  Serial.println(F("========================================"));
+  Serial.println(F("  TEST COMPLETE — entering normal mode"));
+  Serial.println(F("========================================"));
 
+  for (int flash = 0; flash < 3; flash++) {
+    allOn();
+    delay(300);
+    allOff(true);
+    delay(300);
+  }
+}
 
-# 🔥 NEW LOGIC FOR 3 SENSORS
-last_error = 0
+void handleMoodKey(char key) {
+  Serial.print(F("[MOOD] Key: "));
+  Serial.println(key);
+  currentMood = MOOD_NORMAL;
 
-def line_follower_logic():
-    global last_error
+  switch (key) {
 
-    sensors = read_sensors()
-    L, C, R = sensors
+    case 'A':  // Blink current display
+      Serial.println(F("[MOOD] Blink ON"));
+      currentMood = MOOD_BLINK;
+      blinkState = true;
+      break;
 
-    # ── Determine error ──
-    if sensors == [0, 1, 0]:
-        error = 0  # centered
-    elif sensors in ([1, 0, 0], [1, 1, 0]):
-        error = -1  # left
-    elif sensors in ([0, 0, 1], [0, 1, 1]):
-        error = 1   # right
-    elif sensors == [1, 1, 1]:
-        print("End of line detected")
-        stop_motors()
-        return 0, 0
-    else:
-        # line lost → use last direction
-        error = last_error
+    case 'B':  // Chasing single segment
+      Serial.println(F("[MOOD] Chase ON"));
+      allOff(true);
+      chaseIndex = 0;
+      currentMood = MOOD_CHASE;
+      break;
 
-    last_error = error
+    case 'C':  // Wave animation
+      Serial.println(F("[MOOD] Wave ON"));
+      currentMood = MOOD_WAVE;
+      break;
 
-    # ── Motor control ──
-    if error == 0:
-        left_speed = BASE_SPEED
-        right_speed = BASE_SPEED
+    case 'D':  // Blank / clear
+      Serial.println(F("[MOOD] Clear"));
+      allOff();
+      currentMood = MOOD_OFF;
+      break;
 
-    elif error == -1:  # turn left
-        left_speed = 0
-        right_speed = TURN_SPEED
+    case '*':  // All segments ON
+      Serial.println(F("[MOOD] All ON"));
+      allOn();
+      break;
 
-    elif error == 1:  # turn right
-        left_speed = TURN_SPEED
-        right_speed = 0
+    case '#':
+      {  // Random digit
+        int r = random(0, 10);
+        Serial.print(F("[MOOD] Random digit: "));
+        Serial.println(r);
+        showDigit(r);
+        break;
+      }
+  }
+}
 
-    # Clamp
-    left_speed = max(MIN_SPEED, min(MAX_SPEED, left_speed))
-    right_speed = max(MIN_SPEED, min(MAX_SPEED, right_speed))
+void tickMood() {
+  unsigned long now = millis();
 
-    print(f"Sensors: {sensors} -> L={left_speed} R={right_speed}", end='\r')
+  switch (currentMood) {
 
-    return left_speed, right_speed
+    case MOOD_BLINK:
+      if (now - lastMoodTick >= (unsigned long)BLINK_INTERVAL_MS) {
+        lastMoodTick = now;
+        blinkState = !blinkState;
+        for (int i = 0; i < 7; i++)
+          setSegment(i, blinkState ? currentPattern[i] : false);
+      }
+      break;
 
+    case MOOD_CHASE:
+      if (now - lastMoodTick >= (unsigned long)CHASE_INTERVAL_MS) {
+        lastMoodTick = now;
+        allOff(true);
+        setSegment(chaseIndex, true);
+        chaseIndex = (chaseIndex + 1) % 7;
+      }
+      break;
 
-def main():
-    print("\n--- 3 Sensor Line Follower ---")
+    case MOOD_WAVE:
+      {
+        static int waveStep = 0;
+        static bool waveDir = true;
+        if (now - lastMoodTick >= (unsigned long)CHASE_INTERVAL_MS) {
+          lastMoodTick = now;
+          allOff(true);
+          if (waveDir) {
+            for (int i = 0; i <= waveStep; i++) setSegment(i, true);
+            waveStep++;
+            if (waveStep >= 7) {
+              waveDir = false;
+              waveStep = 6;
+            }
+          } else {
+            for (int i = 0; i <= waveStep; i++) setSegment(i, true);
+            waveStep--;
+            if (waveStep < 0) {
+              waveDir = true;
+              waveStep = 0;
+            }
+          }
+        }
+        break;
+      }
 
-    try:
-        while True:
-            left_speed, right_speed = line_follower_logic()
-            set_motor_speed(left_speed, right_speed)
-            time.sleep(0.02)
+    default:
+      break;
+  }
+}
 
-    except KeyboardInterrupt:
-        print("\nStopping...")
-    finally:
-        stop_motors()
-        pwm_a.stop()
-        pwm_b.stop()
-        GPIO.cleanup()
+void setup() {
+  Serial.begin(9600);
+  Serial.println(F("[BOOT] Servo 7-Segment Display — Arduino Mega"));
 
+  // Attach all servos and park them at OFF position
+  for (int i = 0; i < 7; i++) {
+    servos[i].attach(SERVO_PINS[i]);
+    servos[i].write(SERVO_OFF);
+    Serial.print(F("[SERVO] Attached segment "));
+    Serial.print(SEGMENT_NAMES[i]);
+    Serial.print(F(" on pin "));
+    Serial.println(SERVO_PINS[i]);
+  }
 
-if __name__ == "__main__":
-    main()
+  delay(500);  // Let servos settle before test/startup
+
+  randomSeed(analogRead(A0));  // Seed random from floating ADC
+
+  // ----- TEST MODE -----
+  if (TEST_MODE) {
+    runServoTest();
+    // After test, show digit 0 and wait for keypad
+  }
+
+  // Startup animation: sweep all ON then show 0
+  allOn();
+  delay(600);
+  showDigit(0);
+
+  Serial.println(F("[BOOT] Ready. Press a key on the keypad."));
+}
+
+void loop() {
+  char key = keypad.getKey();
+
+  if (key) {
+    if (key >= '0' && key <= '9') {
+      currentMood = MOOD_NORMAL;
+      showDigit(key - '0');
+    } else {
+      handleMoodKey(key);
+    }
+  }
+
+  tickMood();
+}
