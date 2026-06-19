@@ -1,274 +1,354 @@
-#include <Servo.h>
-#include <Keypad.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <DHT.h>
+#include <SoftwareSerial.h>
 
-const int SERVO_PINS[7] = { 2, 3, 4, 5, 6, 7, 8 };
-//                           a  b  c  d  e  f  g
+#define PIN_RGB_R 3  // RGB Red   (PWM)
+#define PIN_RGB_G 5  // RGB Green (PWM)
+#define PIN_RGB_B 6  // RGB Blue  (PWM)
 
-const int SERVO_ON = 0;    // Servo angle when segment is ON
-const int SERVO_OFF = 90;  // Servo angle when segment is OFF
+#define PIN_BUZZER 8  // Active buzzer
 
-const int SEGMENT_SWEEP_DELAY = 60;
+#define PIN_MQ2 A0    // MQ2  smoke / LPG / CO
+#define PIN_MQ135 A1  // MQ135 air quality / CO2
 
-const int COUNT_STEP_MS = 800;
+#define PIN_FLAME 2                  // Flame sensor (digital, LOW = flame)
+#define PIN_FLAME_MODE INPUT_PULLUP  // INPUT or INPUT_PULLUP
 
-const byte ROWS = 4;
-const byte COLS = 4;
+#define PIN_DHT 4  // DHT22 data
+#define DHT_TYPE DHT22
 
-char KEYPAD_KEYS[ROWS][COLS] = {
-  { '1', '2', '3', 'A' },
-  { '4', '5', '6', 'B' },
-  { '7', '8', '9', 'C' },
-  { '*', '0', '#', 'D' }
-};
+#define PIN_SIM_RX 10  // SIM800L TX → Arduino pin 10
+#define PIN_SIM_TX 11  // SIM800L RX → Arduino pin 11
 
-byte ROW_PINS[ROWS] = { 26, 27, 28, 29 };
-byte COL_PINS[COLS] = { 22, 23, 24, 25 };
+#define THRESH_MQ2 400         // Raw ADC value (0-1023)
+#define THRESH_MQ135 450       // Raw ADC value (0-1023)
+#define THRESH_TEMP_HIGH 40.0  // °C
+#define THRESH_HUM_HIGH 80.0   // %
+#define FLAME_DETECTED LOW
 
-const bool DIGITS[10][7] = {
-  //   a  b  c  d  e  f  g
-  { 1, 1, 1, 1, 1, 1, 0 },  // 0
-  { 0, 1, 1, 0, 0, 0, 0 },  // 1
-  { 1, 1, 0, 1, 1, 0, 1 },  // 2
-  { 1, 1, 1, 1, 0, 0, 1 },  // 3
-  { 0, 1, 1, 0, 0, 1, 1 },  // 4
-  { 1, 0, 1, 1, 0, 1, 1 },  // 5
-  { 1, 0, 1, 1, 1, 1, 1 },  // 6
-  { 1, 1, 1, 0, 0, 0, 0 },  // 7
-  { 1, 1, 1, 1, 1, 1, 1 },  // 8
-  { 1, 1, 1, 1, 0, 1, 1 },  // 9
-};
+#define INTERVAL_SENSOR 2000   // How often to read all sensors
+#define INTERVAL_SMS 30000     // Min time between SMS alerts
+#define BUZZER_BEEP_ON 200     // Buzzer ON duration per beep
+#define BUZZER_BEEP_OFF 200    // Buzzer OFF between beeps
+#define LCD_SCROLL_DELAY 1800  // Time per LCD screen
 
-const char* SEGMENT_NAMES[7] = {
-  "a (top)", "b (top-right)", "c (bottom-right)",
-  "d (bottom)", "e (bottom-left)", "f (top-left)", "g (middle)"
-};
+#define SMS_PHONE_NUMBER "+9665XXXXXXXXX"  // <-- put your number
 
-const int BLINK_INTERVAL_MS = 400;
-const int CHASE_INTERVAL_MS = 150;
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+DHT dht(PIN_DHT, DHT_TYPE);
+SoftwareSerial sim800l(PIN_SIM_RX, PIN_SIM_TX);
 
-Servo servos[7];
-Keypad keypad = Keypad(makeKeymap(KEYPAD_KEYS), ROW_PINS, COL_PINS, ROWS, COLS);
+float temperature = 0;
+float humidity = 0;
+int mq2Value = 0;
+int mq135Value = 0;
+bool flameDetected = false;
 
-enum Mood {
-  MOOD_NORMAL,
-  MOOD_COUNT_UP,
-  MOOD_COUNT_DOWN,
-  MOOD_WAVE,
-  MOOD_OFF
-};
-Mood currentMood = MOOD_NORMAL;
+bool alertActive = false;
+unsigned long lastSensorRead = 0;
+unsigned long lastSMSSent = 0;
+unsigned long lastLCDUpdate = 0;
+int lcdPage = 0;
 
-bool blinkState = false;
-int chaseIndex = 0;
-unsigned long lastMoodTick = 0;
-bool currentPattern[7] = { 0 };
-
-int countCurrent = 0;       // digit currently on display during count
-bool countRunning = false;  // is the counter actively ticking?
-
-void setSegment(int seg, bool on) {
-  servos[seg].write(on ? SERVO_ON : SERVO_OFF);
+void setRGB(int r, int g, int b) {
+  analogWrite(PIN_RGB_R, r);
+  analogWrite(PIN_RGB_G, g);
+  analogWrite(PIN_RGB_B, b);
+}
+void rgbOff() {
+  setRGB(0, 0, 0);
+}
+void rgbGreen() {
+  setRGB(0, 255, 0);
+}
+void rgbRed() {
+  setRGB(255, 0, 0);
+}
+void rgbYellow() {
+  setRGB(255, 180, 0);
+}
+void rgbBlue() {
+  setRGB(0, 0, 255);
+}
+void rgbWhite() {
+  setRGB(255, 255, 255);
 }
 
-void showPattern(const bool pattern[7], bool animated = true) {
-  for (int i = 0; i < 7; i++) {
-    currentPattern[i] = pattern[i];
-    setSegment(i, pattern[i]);
-    if (animated && SEGMENT_SWEEP_DELAY > 0) delay(SEGMENT_SWEEP_DELAY);
+void lcdPrint(String line1, String line2) {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(line1.substring(0, 16));
+  lcd.setCursor(0, 1);
+  lcd.print(line2.substring(0, 16));
+}
+
+void lcdAlert(String msg) {
+  lcdPrint("!! ALERT !!", msg);
+}
+
+void triggerBuzzer(int times) {
+  for (int i = 0; i < times; i++) {
+    digitalWrite(PIN_BUZZER, HIGH);
+    delay(BUZZER_BEEP_ON);
+    digitalWrite(PIN_BUZZER, LOW);
+    delay(BUZZER_BEEP_OFF);
   }
 }
 
-void showDigit(int d, bool animated = true) {
-  if (d < 0 || d > 9) return;
-  Serial.print(F("[DISPLAY] Digit: "));
-  Serial.println(d);
-  showPattern(DIGITS[d], animated);
+void buzzerOn() {
+  digitalWrite(PIN_BUZZER, HIGH);
 }
 
-void allOff(bool silent = false) {
-  for (int i = 0; i < 7; i++) {
-    currentPattern[i] = false;
-    setSegment(i, false);
-  }
-  if (!silent) Serial.println(F("[DISPLAY] All OFF"));
+void buzzerOff() {
+  digitalWrite(PIN_BUZZER, LOW);
 }
 
-void allOn() {
-  for (int i = 0; i < 7; i++) {
-    currentPattern[i] = true;
-    setSegment(i, true);
-  }
-  Serial.println(F("[DISPLAY] All ON"));
+void readAllSensors() {
+  temperature = readTemperature();
+  humidity = readHumidity();
+  mq2Value = readMQ2();
+  mq135Value = readMQ135();
+  flameDetected = readFlame();
 }
 
-void handleKey(char key) {
-  Serial.print(F("[KEY] Pressed: "));
-  Serial.println(key);
-
-  // --- Digit keys ---
-  if (key >= '0' && key <= '9') {
-    currentMood = MOOD_NORMAL;
-    countRunning = false;
-    showDigit(key - '0');
-    return;
+float readTemperature() {
+  float t = dht.readTemperature();
+  if (isnan(t)) {
+    Serial.println(F("[DHT] Temperature read failed"));
+    return temperature;  // return last valid
   }
+  return t;
+}
 
-  switch (key) {
+float readHumidity() {
+  float h = dht.readHumidity();
+  if (isnan(h)) {
+    Serial.println(F("[DHT] Humidity read failed"));
+    return humidity;
+  }
+  return h;
+}
 
-    case 'A':  
-      if (currentMood == MOOD_COUNT_UP) {
-        countRunning = !countRunning;
-        Serial.println(countRunning ? F("[COUNT] Resumed UP") : F("[COUNT] Paused"));
-      } else {
-        currentMood = MOOD_COUNT_UP;
-        countCurrent = 1;
-        countRunning = true;
-        lastMoodTick = millis() - COUNT_STEP_MS; 
-        Serial.println(F("[COUNT] Start UP 1→9"));
-      }
-      break;
+int readMQ2() {
+  return analogRead(PIN_MQ2);
+}
 
-    case 'B': 
-      if (currentMood == MOOD_COUNT_DOWN) {
-        countRunning = !countRunning;
-        Serial.println(countRunning ? F("[COUNT] Resumed DOWN") : F("[COUNT] Paused"));
-      } else {
-        currentMood = MOOD_COUNT_DOWN;
-        countCurrent = 9;
-        countRunning = true;
-        lastMoodTick = millis() - COUNT_STEP_MS;  // show first digit immediately
-        Serial.println(F("[COUNT] Start DOWN 9→1"));
-      }
-      break;
+int readMQ135() {
+  return analogRead(PIN_MQ135);
+}
 
-    case 'C':  // Wave animation
-      Serial.println(F("[MOOD] Wave ON"));
-      currentMood = MOOD_WAVE;
-      countRunning = false;
-      break;
+bool readFlame() {
+  return (digitalRead(PIN_FLAME) == FLAME_DETECTED);
+}
 
-    case 'D':  // Blank / clear
-      Serial.println(F("[MOOD] Clear"));
-      currentMood = MOOD_OFF;
-      countRunning = false;
-      allOff();
-      break;
+void printSerial() {
+  Serial.println(F("-------------------------------"));
+  Serial.print(F("Temp:   "));
+  Serial.print(temperature);
+  Serial.println(F(" C"));
+  Serial.print(F("Hum:    "));
+  Serial.print(humidity);
+  Serial.println(F(" %"));
+  Serial.print(F("MQ2:    "));
+  Serial.println(mq2Value);
+  Serial.print(F("MQ135:  "));
+  Serial.println(mq135Value);
+  Serial.print(F("Flame:  "));
+  Serial.println(flameDetected ? "YES" : "NO");
+  Serial.print(F("Alert:  "));
+  Serial.println(alertActive ? "YES" : "NO");
+}
 
-    case '*':  // All segments ON
-      Serial.println(F("[MOOD] All ON"));
-      currentMood = MOOD_NORMAL;
-      countRunning = false;
-      allOn();
-      break;
-
-    case '#':  // Random digit
-      {
-        currentMood = MOOD_NORMAL;
-        countRunning = false;
-        int r = random(0, 10);
-        Serial.print(F("[MOOD] Random digit: "));
-        Serial.println(r);
-        showDigit(r);
-        break;
-      }
+void simSendAT(String cmd) {
+  sim800l.println(cmd);
+  delay(500);
+  while (sim800l.available()) {
+    Serial.write(sim800l.read());
   }
 }
 
-void tickMood() {
-  unsigned long now = millis();
-
-  switch (currentMood) {
-
-    // ------ Count UP 1 → 9 ------
-    case MOOD_COUNT_UP:
-      if (!countRunning) break;
-      if (now - lastMoodTick >= (unsigned long)COUNT_STEP_MS) {
-        lastMoodTick = now;
-        showDigit(countCurrent, false);  // no sweep delay during auto-count
-        if (countCurrent < 9) {
-          countCurrent++;
-        } else {
-          // Reached 9 — stop automatically
-          countRunning = false;
-          Serial.println(F("[COUNT] Reached 9, stopped"));
-        }
-      }
-      break;
-
-    // ------ Count DOWN 9 → 1 ------
-    case MOOD_COUNT_DOWN:
-      if (!countRunning) break;
-      if (now - lastMoodTick >= (unsigned long)COUNT_STEP_MS) {
-        lastMoodTick = now;
-        showDigit(countCurrent, false);
-        if (countCurrent > 1) {
-          countCurrent--;
-        } else {
-          // Reached 1 — stop automatically
-          countRunning = false;
-          Serial.println(F("[COUNT] Reached 1, stopped"));
-        }
-      }
-      break;
-
-    // ------ Wave ------
-    case MOOD_WAVE:
-      {
-        static int waveStep = 0;
-        static bool waveDir = true;
-        if (now - lastMoodTick >= (unsigned long)CHASE_INTERVAL_MS) {
-          lastMoodTick = now;
-          allOff(true);
-          if (waveDir) {
-            for (int i = 0; i <= waveStep; i++) setSegment(i, true);
-            waveStep++;
-            if (waveStep >= 7) {
-              waveDir = false;
-              waveStep = 6;
-            }
-          } else {
-            for (int i = 0; i <= waveStep; i++) setSegment(i, true);
-            waveStep--;
-            if (waveStep < 0) {
-              waveDir = true;
-              waveStep = 0;
-            }
-          }
-        }
-        break;
-      }
-
-    default:
-      break;
-  }
+void simSendSMS(String number, String message) {
+  Serial.println(F("[SIM] Sending SMS..."));
+  sim800l.println("AT+CMGF=1");
+  delay(300);
+  sim800l.println("AT+CMGS=\"" + number + "\"");
+  delay(300);
+  sim800l.print(message);
+  delay(100);
+  sim800l.write(26);
+  delay(3000);
+  Serial.println(F("[SIM] SMS sent"));
 }
 
 void setup() {
   Serial.begin(9600);
-  Serial.println(F("[BOOT] Servo 7-Segment Display — Arduino Mega"));
+  testRGB();
+  testLCD();
+  testBuzzer();
+  testSensors();
+  testMessages();
+  fullSetup();
+}
 
-  for (int i = 0; i < 7; i++) {
-    servos[i].attach(SERVO_PINS[i]);
-    servos[i].write(SERVO_OFF);
-    Serial.print(F("[SERVO] Attached segment "));
-    Serial.print(SEGMENT_NAMES[i]);
-    Serial.print(F(" on pin "));
-    Serial.println(SERVO_PINS[i]);
+void testRGB() {
+  pinMode(PIN_RGB_R, OUTPUT);
+  pinMode(PIN_RGB_G, OUTPUT);
+  pinMode(PIN_RGB_B, OUTPUT);
+
+  while (1) {
+    rgbRed();
+    delay(1000);
+    rgbGreen();
+    delay(1000);
+    rgbBlue();
+    delay(1000);
   }
+}
 
-  delay(500);
-  randomSeed(analogRead(A0));
+void testLCD() {
+  lcd.init();
+  lcd.backlight();
+  int counter = 1;
+  while (1) {
+    lcdPrint("LCD is Working", String(counter));
+    delay(1000);
+    counter++;
+  }
+}
 
-  // Startup animation: flash all ON then show 0
-  allOn();
-  delay(600);
-  showDigit(0);
+void testBuzzer() {
+  pinMode(PIN_BUZZER, OUTPUT);
 
-  Serial.println(F("[BOOT] Ready. Press a key on the keypad."));
+  while (1) {
+    triggerBuzzer(3);
+    delay(1000);
+  }
+}
+
+void testSensors() {
+  pinMode(PIN_FLAME, PIN_FLAME_MODE);
+  dht.begin();
+  while (1) {
+    readAllSensors();
+    printSerial();
+    delay(2000);
+  }
+}
+
+void testMessages() {
+  sim800l.begin(9600);
+  delay(1000);
+  simSendAT("AT");
+  simSendAT("AT+CSQ");
+  simSendAT("AT+CCID");
+  simSendAT("AT+CREG?");
+  simSendAT("AT+CMGF=1");
+
+  while (1) {
+    simSendSMS(SMS_PHONE_NUMBER, "Test Message");
+    delay(18000);
+  }
+}
+
+void fullSetup() {
+  pinMode(PIN_RGB_R, OUTPUT);
+  pinMode(PIN_RGB_G, OUTPUT);
+  pinMode(PIN_RGB_B, OUTPUT);
+  pinMode(PIN_BUZZER, OUTPUT);
+  pinMode(PIN_FLAME, PIN_FLAME_MODE);
+
+  lcd.init();
+  lcd.backlight();
+  lcdPrint("Safety Monitor", "Initializing...");
+  delay(1500);
+
+  dht.begin();
+
+  sim800l.begin(9600);
+  delay(1000);
+  simSendAT("AT");    
+  simSendAT("AT+CMGF=1");  
+
+  setRGB(0, 255, 0);
+  lcdPrint("System Ready", "All OK");
+  delay(1000);
+
+  Serial.println(F("=== Safety Monitor Started ==="));
 }
 
 void loop() {
-  char key = keypad.getKey();
-  if (key) handleKey(key);
-  tickMood();
+  unsigned long now = millis();
+
+  if (now - lastSensorRead >= INTERVAL_SENSOR) {
+    lastSensorRead = now;
+    readAllSensors();
+    evaluateAlerts(now);
+    printSerial();
+  }
+
+  if (now - lastLCDUpdate >= LCD_SCROLL_DELAY) {
+    lastLCDUpdate = now;
+    updateLCD();
+  }
+}
+
+void evaluateAlerts(unsigned long now) {
+  String alertMsg = "";
+
+  if (flameDetected) alertMsg += "FLAME! ";
+  if (mq2Value > THRESH_MQ2) alertMsg += "SMOKE! ";
+  if (mq135Value > THRESH_MQ135) alertMsg += "GAS! ";
+  if (temperature > THRESH_TEMP_HIGH) alertMsg += "HIGH TEMP! ";
+  if (humidity > THRESH_HUM_HIGH) alertMsg += "HIGH HUM! ";
+
+  if (alertMsg.length() > 0) {
+    alertActive = true;
+    triggerBuzzer(3);   // 3 beeps
+    setRGB(255, 0, 0);  // Red
+
+    if (now - lastSMSSent >= INTERVAL_SMS) {
+      lastSMSSent = now;
+      String sms = "ALERT: " + alertMsg
+                   + " T=" + String(temperature, 1) + "C"
+                   + " H=" + String(humidity, 1) + "%"
+                   + " MQ2=" + String(mq2Value)
+                   + " MQ135=" + String(mq135Value);
+      simSendSMS(SMS_PHONE_NUMBER, sms);
+    }
+  } else {
+    alertActive = false;
+    buzzerOff();
+    setRGB(0, 255, 0);
+  }
+}
+
+void updateLCD() {
+  if (alertActive) {
+    String alertLine = "";
+    if (flameDetected) alertLine = "FLAME DETECTED";
+    else if (mq2Value > THRESH_MQ2) alertLine = "SMOKE/CO HIGH";
+    else if (mq135Value > THRESH_MQ135) alertLine = "AIR QUALITY BAD";
+    else if (temperature > THRESH_TEMP_HIGH) alertLine = "TEMP TOO HIGH";
+    else if (humidity > THRESH_HUM_HIGH) alertLine = "HUMIDITY HIGH";
+    lcdAlert(alertLine);
+    return;
+  }
+
+  switch (lcdPage) {
+    case 0:
+      lcdPrint("Temp: " + String(temperature, 1) + " C",
+               "Hum:  " + String(humidity, 1) + " %");
+      break;
+    case 1:
+      lcdPrint("MQ2:  " + String(mq2Value),
+               "MQ135:" + String(mq135Value));
+      break;
+    case 2:
+      lcdPrint("Flame:" + String(flameDetected ? "YES" : "NO"),
+               "Status: OK");
+      break;
+  }
+
+  lcdPage = (lcdPage + 1) % 3;
 }
