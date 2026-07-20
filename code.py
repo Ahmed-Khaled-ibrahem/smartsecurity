@@ -1,21 +1,9 @@
-/*
- * SCD41 CO2 Sensor - I2C Scanner + Sensor Test
- * ---------------------------------------------
- * Run this on your ESP32. It will:
- *   1. Scan the I2C bus and print every address found
- *   2. Attempt to init and read from the SCD41
- *   3. Print raw error codes at every step so failures are visible
- *
- * IMPORTANT: Update SDA_PIN / SCL_PIN below to match your wiring
- * if you're not using the ESP32's default I2C pins.
- */
-
 #include <Wire.h>
 #include <SensirionI2cScd4x.h>
 
 // ---- CONFIG ----
-#define SDA_PIN 21   // change to your actual SDA pin
-#define SCL_PIN 22   // change to your actual SCL pin
+#define SDA_PIN 21        // change to your actual SDA pin
+#define SCL_PIN 22        // change to your actual SCL pin
 #define I2C_CLOCK 100000  // SCD4x max supported speed is 100kHz
 
 SensirionI2cScd4x scd4x;
@@ -56,11 +44,10 @@ bool init_co2_sensor() {
     Serial.print("stopPeriodicMeasurement error: ");
     Serial.println(errorMessage);
   }
-  delay(1000); // give sensor time to settle after stop
+  delay(1000);
 
-  // Confirm sensor identity/communication
-  uint16_t serial0, serial1, serial2;
-  err = scd4x.getSerialNumber(serial0, serial1, serial2);
+  uint64_t serialNumber = 0;
+  err = scd4x.getSerialNumber(serialNumber);
   if (err) {
     errorToString(err, errorMessage, sizeof(errorMessage));
     Serial.print("getSerialNumber error: ");
@@ -68,7 +55,7 @@ bool init_co2_sensor() {
     Serial.println("SCD41 not responding on the bus.");
     return false;
   }
-  Serial.printf("SCD41 serial number: %04X%04X%04X\n", serial0, serial1, serial2);
+  Serial.printf("SCD41 serial number: %012llX\n", serialNumber);
 
   err = scd4x.startPeriodicMeasurement();
   if (err) {
@@ -127,7 +114,7 @@ bool sensorReady = false;
 
 void setup() {
   Serial.begin(115200);
-  delay(1000); // let Serial settle on ESP32 boot
+  delay(1000);  // let Serial settle on ESP32 boot
 
   Wire.begin(SDA_PIN, SCL_PIN);
   Wire.setClock(I2C_CLOCK);
@@ -148,5 +135,5 @@ void loop() {
     scanI2C();
     sensorReady = init_co2_sensor();
   }
-  delay(5000); // SCD41 measures every 5s in periodic mode
+  delay(5000);  // SCD41 measures every 5s in periodic mode
 }
