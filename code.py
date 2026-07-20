@@ -1,354 +1,152 @@
+/*
+ * SCD41 CO2 Sensor - I2C Scanner + Sensor Test
+ * ---------------------------------------------
+ * Run this on your ESP32. It will:
+ *   1. Scan the I2C bus and print every address found
+ *   2. Attempt to init and read from the SCD41
+ *   3. Print raw error codes at every step so failures are visible
+ *
+ * IMPORTANT: Update SDA_PIN / SCL_PIN below to match your wiring
+ * if you're not using the ESP32's default I2C pins.
+ */
+
 #include <Wire.h>
-#include <LiquidCrystal_I2C.h>
-#include <DHT.h>
-#include <SoftwareSerial.h>
+#include <SensirionI2cScd4x.h>
 
-#define PIN_RGB_R 3  // RGB Red   (PWM)
-#define PIN_RGB_G 5  // RGB Green (PWM)
-#define PIN_RGB_B 6  // RGB Blue  (PWM)
+// ---- CONFIG ----
+#define SDA_PIN 21   // change to your actual SDA pin
+#define SCL_PIN 22   // change to your actual SCL pin
+#define I2C_CLOCK 100000  // SCD4x max supported speed is 100kHz
 
-#define PIN_BUZZER 8  // Active buzzer
+SensirionI2cScd4x scd4x;
+static char errorMessage[64];
+uint16_t lastCo2 = 0;
 
-#define PIN_MQ2 A0    // MQ2  smoke / LPG / CO
-#define PIN_MQ135 A1  // MQ135 air quality / CO2
-
-#define PIN_FLAME 2                  // Flame sensor (digital, LOW = flame)
-#define PIN_FLAME_MODE INPUT_PULLUP  // INPUT or INPUT_PULLUP
-
-#define PIN_DHT 4  // DHT22 data
-#define DHT_TYPE DHT22
-
-#define PIN_SIM_RX 10  // SIM800L TX → Arduino pin 10
-#define PIN_SIM_TX 11  // SIM800L RX → Arduino pin 11
-
-#define THRESH_MQ2 400         // Raw ADC value (0-1023)
-#define THRESH_MQ135 450       // Raw ADC value (0-1023)
-#define THRESH_TEMP_HIGH 40.0  // °C
-#define THRESH_HUM_HIGH 80.0   // %
-#define FLAME_DETECTED LOW
-
-#define INTERVAL_SENSOR 2000   // How often to read all sensors
-#define INTERVAL_SMS 30000     // Min time between SMS alerts
-#define BUZZER_BEEP_ON 200     // Buzzer ON duration per beep
-#define BUZZER_BEEP_OFF 200    // Buzzer OFF between beeps
-#define LCD_SCROLL_DELAY 1800  // Time per LCD screen
-
-#define SMS_PHONE_NUMBER "+9665XXXXXXXXX"  // <-- put your number
-
-LiquidCrystal_I2C lcd(0x27, 16, 2);
-DHT dht(PIN_DHT, DHT_TYPE);
-SoftwareSerial sim800l(PIN_SIM_RX, PIN_SIM_TX);
-
-float temperature = 0;
-float humidity = 0;
-int mq2Value = 0;
-int mq135Value = 0;
-bool flameDetected = false;
-
-bool alertActive = false;
-unsigned long lastSensorRead = 0;
-unsigned long lastSMSSent = 0;
-unsigned long lastLCDUpdate = 0;
-int lcdPage = 0;
-
-void setRGB(int r, int g, int b) {
-  analogWrite(PIN_RGB_R, r);
-  analogWrite(PIN_RGB_G, g);
-  analogWrite(PIN_RGB_B, b);
-}
-void rgbOff() {
-  setRGB(0, 0, 0);
-}
-void rgbGreen() {
-  setRGB(0, 255, 0);
-}
-void rgbRed() {
-  setRGB(255, 0, 0);
-}
-void rgbYellow() {
-  setRGB(255, 180, 0);
-}
-void rgbBlue() {
-  setRGB(0, 0, 255);
-}
-void rgbWhite() {
-  setRGB(255, 255, 255);
-}
-
-void lcdPrint(String line1, String line2) {
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print(line1.substring(0, 16));
-  lcd.setCursor(0, 1);
-  lcd.print(line2.substring(0, 16));
-}
-
-void lcdAlert(String msg) {
-  lcdPrint("!! ALERT !!", msg);
-}
-
-void triggerBuzzer(int times) {
-  for (int i = 0; i < times; i++) {
-    digitalWrite(PIN_BUZZER, HIGH);
-    delay(BUZZER_BEEP_ON);
-    digitalWrite(PIN_BUZZER, LOW);
-    delay(BUZZER_BEEP_OFF);
+// ---------------------------------------------------
+// I2C Scanner
+// ---------------------------------------------------
+void scanI2C() {
+  Serial.println("\n--- Scanning I2C bus ---");
+  int found = 0;
+  for (uint8_t addr = 1; addr < 127; addr++) {
+    Wire.beginTransmission(addr);
+    uint8_t err = Wire.endTransmission();
+    if (err == 0) {
+      Serial.printf("Found device at 0x%02X\n", addr);
+      found++;
+    }
   }
-}
-
-void buzzerOn() {
-  digitalWrite(PIN_BUZZER, HIGH);
-}
-
-void buzzerOff() {
-  digitalWrite(PIN_BUZZER, LOW);
-}
-
-void readAllSensors() {
-  temperature = readTemperature();
-  humidity = readHumidity();
-  mq2Value = readMQ2();
-  mq135Value = readMQ135();
-  flameDetected = readFlame();
-}
-
-float readTemperature() {
-  float t = dht.readTemperature();
-  if (isnan(t)) {
-    Serial.println(F("[DHT] Temperature read failed"));
-    return temperature;  // return last valid
+  if (found == 0) {
+    Serial.println("No I2C devices found. Check wiring, power, pull-ups.");
+  } else {
+    Serial.printf("Scan complete. %d device(s) found.\n", found);
   }
-  return t;
+  Serial.println("------------------------\n");
 }
 
-float readHumidity() {
-  float h = dht.readHumidity();
-  if (isnan(h)) {
-    Serial.println(F("[DHT] Humidity read failed"));
-    return humidity;
+// ---------------------------------------------------
+// SCD41 Init
+// ---------------------------------------------------
+bool init_co2_sensor() {
+  scd4x.begin(Wire, SCD41_I2C_ADDR_62);
+
+  uint16_t err = scd4x.stopPeriodicMeasurement();
+  if (err) {
+    errorToString(err, errorMessage, sizeof(errorMessage));
+    Serial.print("stopPeriodicMeasurement error: ");
+    Serial.println(errorMessage);
   }
-  return h;
-}
+  delay(1000); // give sensor time to settle after stop
 
-int readMQ2() {
-  return analogRead(PIN_MQ2);
-}
-
-int readMQ135() {
-  return analogRead(PIN_MQ135);
-}
-
-bool readFlame() {
-  return (digitalRead(PIN_FLAME) == FLAME_DETECTED);
-}
-
-void printSerial() {
-  Serial.println(F("-------------------------------"));
-  Serial.print(F("Temp:   "));
-  Serial.print(temperature);
-  Serial.println(F(" C"));
-  Serial.print(F("Hum:    "));
-  Serial.print(humidity);
-  Serial.println(F(" %"));
-  Serial.print(F("MQ2:    "));
-  Serial.println(mq2Value);
-  Serial.print(F("MQ135:  "));
-  Serial.println(mq135Value);
-  Serial.print(F("Flame:  "));
-  Serial.println(flameDetected ? "YES" : "NO");
-  Serial.print(F("Alert:  "));
-  Serial.println(alertActive ? "YES" : "NO");
-}
-
-void simSendAT(String cmd) {
-  sim800l.println(cmd);
-  delay(500);
-  while (sim800l.available()) {
-    Serial.write(sim800l.read());
+  // Confirm sensor identity/communication
+  uint16_t serial0, serial1, serial2;
+  err = scd4x.getSerialNumber(serial0, serial1, serial2);
+  if (err) {
+    errorToString(err, errorMessage, sizeof(errorMessage));
+    Serial.print("getSerialNumber error: ");
+    Serial.println(errorMessage);
+    Serial.println("SCD41 not responding on the bus.");
+    return false;
   }
+  Serial.printf("SCD41 serial number: %04X%04X%04X\n", serial0, serial1, serial2);
+
+  err = scd4x.startPeriodicMeasurement();
+  if (err) {
+    errorToString(err, errorMessage, sizeof(errorMessage));
+    Serial.print("startPeriodicMeasurement error: ");
+    Serial.println(errorMessage);
+    return false;
+  }
+
+  Serial.println("SCD41 periodic measurement started successfully.");
+  return true;
 }
 
-void simSendSMS(String number, String message) {
-  Serial.println(F("[SIM] Sending SMS..."));
-  sim800l.println("AT+CMGF=1");
-  delay(300);
-  sim800l.println("AT+CMGS=\"" + number + "\"");
-  delay(300);
-  sim800l.print(message);
-  delay(100);
-  sim800l.write(26);
-  delay(3000);
-  Serial.println(F("[SIM] SMS sent"));
+// ---------------------------------------------------
+// SCD41 Read
+// ---------------------------------------------------
+uint16_t read_co2() {
+  bool dataReady = false;
+  uint16_t err = scd4x.getDataReadyStatus(dataReady);
+  if (err) {
+    errorToString(err, errorMessage, sizeof(errorMessage));
+    Serial.print("getDataReadyStatus error: ");
+    Serial.println(errorMessage);
+    return lastCo2;
+  }
+
+  if (!dataReady) {
+    Serial.println("Data not ready yet...");
+    return lastCo2;
+  }
+
+  uint16_t co2 = 0;
+  float scdTemp = 0, scdHum = 0;
+  err = scd4x.readMeasurement(co2, scdTemp, scdHum);
+  if (err) {
+    errorToString(err, errorMessage, sizeof(errorMessage));
+    Serial.print("readMeasurement error: ");
+    Serial.println(errorMessage);
+    return lastCo2;
+  }
+
+  if (co2 != 0) {
+    lastCo2 = co2;
+    Serial.printf("CO2: %u ppm | Temp: %.2f C | Humidity: %.2f %%\n", co2, scdTemp, scdHum);
+  } else {
+    Serial.println("Read returned co2 = 0, ignoring.");
+  }
+
+  return lastCo2;
 }
+
+// ---------------------------------------------------
+// Setup / Loop
+// ---------------------------------------------------
+bool sensorReady = false;
 
 void setup() {
-  Serial.begin(9600);
-  testRGB();
-  testLCD();
-  testBuzzer();
-  testSensors();
-  testMessages();
-  fullSetup();
-}
+  Serial.begin(115200);
+  delay(1000); // let Serial settle on ESP32 boot
 
-void testRGB() {
-  pinMode(PIN_RGB_R, OUTPUT);
-  pinMode(PIN_RGB_G, OUTPUT);
-  pinMode(PIN_RGB_B, OUTPUT);
+  Wire.begin(SDA_PIN, SCL_PIN);
+  Wire.setClock(I2C_CLOCK);
 
-  while (1) {
-    rgbRed();
-    delay(1000);
-    rgbGreen();
-    delay(1000);
-    rgbBlue();
-    delay(1000);
+  scanI2C();
+
+  sensorReady = init_co2_sensor();
+  if (!sensorReady) {
+    Serial.println("Sensor init failed. Check scan results above.");
   }
-}
-
-void testLCD() {
-  lcd.init();
-  lcd.backlight();
-  int counter = 1;
-  while (1) {
-    lcdPrint("LCD is Working", String(counter));
-    delay(1000);
-    counter++;
-  }
-}
-
-void testBuzzer() {
-  pinMode(PIN_BUZZER, OUTPUT);
-
-  while (1) {
-    triggerBuzzer(3);
-    delay(1000);
-  }
-}
-
-void testSensors() {
-  pinMode(PIN_FLAME, PIN_FLAME_MODE);
-  dht.begin();
-  while (1) {
-    readAllSensors();
-    printSerial();
-    delay(2000);
-  }
-}
-
-void testMessages() {
-  sim800l.begin(9600);
-  delay(1000);
-  simSendAT("AT");
-  simSendAT("AT+CSQ");
-  simSendAT("AT+CCID");
-  simSendAT("AT+CREG?");
-  simSendAT("AT+CMGF=1");
-
-  while (1) {
-    simSendSMS(SMS_PHONE_NUMBER, "Test Message");
-    delay(18000);
-  }
-}
-
-void fullSetup() {
-  pinMode(PIN_RGB_R, OUTPUT);
-  pinMode(PIN_RGB_G, OUTPUT);
-  pinMode(PIN_RGB_B, OUTPUT);
-  pinMode(PIN_BUZZER, OUTPUT);
-  pinMode(PIN_FLAME, PIN_FLAME_MODE);
-
-  lcd.init();
-  lcd.backlight();
-  lcdPrint("Safety Monitor", "Initializing...");
-  delay(1500);
-
-  dht.begin();
-
-  sim800l.begin(9600);
-  delay(1000);
-  simSendAT("AT");    
-  simSendAT("AT+CMGF=1");  
-
-  setRGB(0, 255, 0);
-  lcdPrint("System Ready", "All OK");
-  delay(1000);
-
-  Serial.println(F("=== Safety Monitor Started ==="));
 }
 
 void loop() {
-  unsigned long now = millis();
-
-  if (now - lastSensorRead >= INTERVAL_SENSOR) {
-    lastSensorRead = now;
-    readAllSensors();
-    evaluateAlerts(now);
-    printSerial();
-  }
-
-  if (now - lastLCDUpdate >= LCD_SCROLL_DELAY) {
-    lastLCDUpdate = now;
-    updateLCD();
-  }
-}
-
-void evaluateAlerts(unsigned long now) {
-  String alertMsg = "";
-
-  if (flameDetected) alertMsg += "FLAME! ";
-  if (mq2Value > THRESH_MQ2) alertMsg += "SMOKE! ";
-  if (mq135Value > THRESH_MQ135) alertMsg += "GAS! ";
-  if (temperature > THRESH_TEMP_HIGH) alertMsg += "HIGH TEMP! ";
-  if (humidity > THRESH_HUM_HIGH) alertMsg += "HIGH HUM! ";
-
-  if (alertMsg.length() > 0) {
-    alertActive = true;
-    triggerBuzzer(3);   // 3 beeps
-    setRGB(255, 0, 0);  // Red
-
-    if (now - lastSMSSent >= INTERVAL_SMS) {
-      lastSMSSent = now;
-      String sms = "ALERT: " + alertMsg
-                   + " T=" + String(temperature, 1) + "C"
-                   + " H=" + String(humidity, 1) + "%"
-                   + " MQ2=" + String(mq2Value)
-                   + " MQ135=" + String(mq135Value);
-      simSendSMS(SMS_PHONE_NUMBER, sms);
-    }
+  if (sensorReady) {
+    read_co2();
   } else {
-    alertActive = false;
-    buzzerOff();
-    setRGB(0, 255, 0);
+    // retry scan + init every 5s if sensor wasn't found at boot
+    scanI2C();
+    sensorReady = init_co2_sensor();
   }
-}
-
-void updateLCD() {
-  if (alertActive) {
-    String alertLine = "";
-    if (flameDetected) alertLine = "FLAME DETECTED";
-    else if (mq2Value > THRESH_MQ2) alertLine = "SMOKE/CO HIGH";
-    else if (mq135Value > THRESH_MQ135) alertLine = "AIR QUALITY BAD";
-    else if (temperature > THRESH_TEMP_HIGH) alertLine = "TEMP TOO HIGH";
-    else if (humidity > THRESH_HUM_HIGH) alertLine = "HUMIDITY HIGH";
-    lcdAlert(alertLine);
-    return;
-  }
-
-  switch (lcdPage) {
-    case 0:
-      lcdPrint("Temp: " + String(temperature, 1) + " C",
-               "Hum:  " + String(humidity, 1) + " %");
-      break;
-    case 1:
-      lcdPrint("MQ2:  " + String(mq2Value),
-               "MQ135:" + String(mq135Value));
-      break;
-    case 2:
-      lcdPrint("Flame:" + String(flameDetected ? "YES" : "NO"),
-               "Status: OK");
-      break;
-  }
-
-  lcdPage = (lcdPage + 1) % 3;
+  delay(5000); // SCD41 measures every 5s in periodic mode
 }
