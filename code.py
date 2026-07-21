@@ -15,15 +15,15 @@ void init_co2_sensor() {
   delay(1000);  // Wait after power-up
 
   // Stop any previous measurement
-  err = scd4x.stopPeriodicMeasurement();
+  int16_t err2 = scd4x.stopPeriodicMeasurement();
   Serial.print("stopPeriodicMeasurement() Error: ");
-  Serial.print(err);
+  Serial.print(err2);
   Serial.print(" (0x");
-  Serial.print(err, HEX);
+  Serial.print(err2, HEX);
   Serial.println(")");
 
   delay(500);
-  
+
   // Read serial number
   uint64_t serialNumber;
   int16_t err = scd4x.getSerialNumber(serialNumber);
