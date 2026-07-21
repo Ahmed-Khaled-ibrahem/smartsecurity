@@ -14,6 +14,16 @@ void init_co2_sensor() {
 
   delay(1000);  // Wait after power-up
 
+  // Stop any previous measurement
+  err = scd4x.stopPeriodicMeasurement();
+  Serial.print("stopPeriodicMeasurement() Error: ");
+  Serial.print(err);
+  Serial.print(" (0x");
+  Serial.print(err, HEX);
+  Serial.println(")");
+
+  delay(500);
+  
   // Read serial number
   uint64_t serialNumber;
   int16_t err = scd4x.getSerialNumber(serialNumber);
@@ -31,16 +41,6 @@ void init_co2_sensor() {
     Serial.println("Failed to communicate with SCD41.");
     return;
   }
-
-  // Stop any previous measurement
-  err = scd4x.stopPeriodicMeasurement();
-  Serial.print("stopPeriodicMeasurement() Error: ");
-  Serial.print(err);
-  Serial.print(" (0x");
-  Serial.print(err, HEX);
-  Serial.println(")");
-
-  delay(500);
 
   // Start measurements
   err = scd4x.startPeriodicMeasurement();
