@@ -1,26 +1,110 @@
-#define SOIL_DRY 3200
-#define SOIL_WET 1200
+#include <Wire.h>
+#include <SensirionI2cScd4x.h>
 
-#define SOIL_PIN 36
+SensirionI2cScd4x scd4x;
 
-void init_soil_sensor() {
-  pinMode(SOIL_PIN, INPUT);
+uint16_t lastCo2 = 0;
+
+void init_co2_sensor() {
+  Wire.begin();
+  Wire.setClock(100000);  // 100 kHz
+
+  // Initialize SCD41 driver
+  scd4x.begin(Wire, SCD41_I2C_ADDR_62);
+
+  delay(1000);  // Wait after power-up
+
+  // Read serial number
+  uint64_t serialNumber;
+  int16_t err = scd4x.getSerialNumber(serialNumber);
+
+  Serial.print("getSerialNumber() Error: ");
+  Serial.print(err);
+  Serial.print(" (0x");
+  Serial.print(err, HEX);
+  Serial.println(")");
+
+  if (err == 0) {
+    Serial.print("Serial Number: 0x");
+    Serial.println((unsigned long long)serialNumber, HEX);
+  } else {
+    Serial.println("Failed to communicate with SCD41.");
+    return;
+  }
+
+  // Stop any previous measurement
+  err = scd4x.stopPeriodicMeasurement();
+  Serial.print("stopPeriodicMeasurement() Error: ");
+  Serial.print(err);
+  Serial.print(" (0x");
+  Serial.print(err, HEX);
+  Serial.println(")");
+
+  delay(500);
+
+  // Start measurements
+  err = scd4x.startPeriodicMeasurement();
+
+  Serial.print("startPeriodicMeasurement() Error: ");
+  Serial.print(err);
+  Serial.print(" (0x");
+  Serial.print(err, HEX);
+  Serial.println(")");
+
+  if (err == 0) {
+    Serial.println("SCD41 measurement started successfully.");
+  } else {
+    Serial.println("Failed to start periodic measurement.");
+  }
+
+  Serial.println("--------------------------------");
 }
 
-float read_soil() {
-  int raw = analogRead(SOIL_PIN);
-  float percentage = map(raw, SOIL_DRY, SOIL_WET, 0, 100);
-  percentage = constrain(percentage, 0, 100);
-  return percentage;
+uint16_t read_co2() {
+  bool dataReady = false;
+  uint16_t err = scd4x.getDataReadyStatus(dataReady);
+
+  if (err) {
+    Serial.print("getDataReadyStatus Error: ");
+    Serial.println(err);
+    return lastCo2;
+  }
+
+  if (dataReady) {
+    uint16_t co2;
+    float temperature;
+    float humidity;
+
+    err = scd4x.readMeasurement(co2, temperature, humidity);
+
+    if (err == 0 && co2 != 0) {
+      lastCo2 = co2;
+
+      Serial.print("CO2: ");
+      Serial.print(co2);
+      Serial.print(" ppm | Temp: ");
+      Serial.print(temperature);
+      Serial.print(" °C | Humidity: ");
+      Serial.print(humidity);
+      Serial.println(" %");
+    } else {
+      Serial.print("readMeasurement Error: ");
+      Serial.println(err);
+    }
+  } else {
+    Serial.println("Measurement not ready.");
+  }
+
+  return lastCo2;
 }
 
-void test_soil_sensor() {
-  init_soil_sensor();
+void test_co2_sensor() {
+  delay(2000);
 
-  while (1) {
-    Serial.print("Current SOIL VALUE : ");
-    Serial.println(read_soil());
-    Serial.println(analogRead(SOIL_PIN));
+  init_co2_sensor();
+
+  while (true) {
+    read_co2();
     delay(2000);
   }
 }
